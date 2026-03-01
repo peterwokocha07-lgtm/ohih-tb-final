@@ -487,24 +487,25 @@ def page_diagnosis_events():
     cxr = st.selectbox("CXR", ["Not done", "Suggestive", "Not suggestive"])
     notes = st.text_area("Notes")
 
+    # ✅ Screening UI must be INSIDE the function (proper indentation)
     st.markdown("### TB Screening Symptoms")
+    col1, col2 = st.columns(2)
 
-col1, col2 = st.columns(2)
+    with col1:
+        sx_cough_2w = st.checkbox("Cough ≥ 2 weeks")
+        sx_fever = st.checkbox("Fever")
+        sx_night_sweats = st.checkbox("Night sweats")
+        sx_weight_loss = st.checkbox("Weight loss")
+        sx_hemoptysis = st.checkbox("Hemoptysis")
 
-with col1:
-    sx_cough_2w = st.checkbox("Cough ≥ 2 weeks")
-    sx_fever = st.checkbox("Fever")
-    sx_night_sweats = st.checkbox("Night sweats")
-    sx_weight_loss = st.checkbox("Weight loss")
-    sx_hemoptysis = st.checkbox("Hemoptysis")
+    with col2:
+        sx_chest_pain = st.checkbox("Chest pain / breathlessness")
+        rf_contact_tb = st.checkbox("Contact with TB case")
+        rf_prev_tb = st.checkbox("Previous TB treatment")
+        rf_diabetes = st.checkbox("Diabetes")
+        rf_malnutrition = st.checkbox("Malnutrition / underweight")
 
-with col2:
-    sx_chest_pain = st.checkbox("Chest pain / breathlessness")
-    rf_contact_tb = st.checkbox("Contact with TB case")
-    rf_prev_tb = st.checkbox("Previous TB treatment")
-    rf_diabetes = st.checkbox("Diabetes")
-    rf_malnutrition = st.checkbox("Malnutrition / underweight")
-    
+    # Keep Save button OUTSIDE the columns so it shows normally
     if st.button("Save event", type="primary"):
         payload = {
             "facility_id": facility_id,
@@ -516,7 +517,20 @@ with col2:
             "cxr": cxr,
             "notes": notes.strip(),
             "timestamp": now_iso(),
+
+            # ✅ include screening fields (even before DB columns, UI will show)
+            "sx_cough_2w": sx_cough_2w,
+            "sx_fever": sx_fever,
+            "sx_night_sweats": sx_night_sweats,
+            "sx_weight_loss": sx_weight_loss,
+            "sx_hemoptysis": sx_hemoptysis,
+            "sx_chest_pain": sx_chest_pain,
+            "rf_contact_tb": rf_contact_tb,
+            "rf_prev_tb": rf_prev_tb,
+            "rf_diabetes": rf_diabetes,
+            "rf_malnutrition": rf_malnutrition,
         }
+
         insert_row("events", payload)
         st.success("Saved ✅")
         st.rerun()
