@@ -141,6 +141,9 @@ import streamlit as st
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "").strip()
 SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", "").strip()
 
+AUTH_BASE = f"{SUPABASE_URL}/auth/v1"
+REST_BASE = f"{SUPABASE_URL}/rest/v1"
+
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.error("Missing SUPABASE_URL or SUPABASE_ANON_KEY in Streamlit Secrets.")
     st.stop()
