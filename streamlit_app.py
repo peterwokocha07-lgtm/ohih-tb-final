@@ -145,6 +145,10 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.error("Missing SUPABASE_URL or SUPABASE_ANON_KEY in Streamlit Secrets.")
     st.stop()
 
+# Build API base URLs from SUPABASE_URL
+AUTH_BASE = f"{SUPABASE_URL}/auth/v1"
+REST_BASE = f"{SUPABASE_URL}/rest/v1"
+
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
