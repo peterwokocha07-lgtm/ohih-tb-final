@@ -34,81 +34,34 @@ st.markdown(
   box-shadow: 0 10px 28px rgba(0,0,0,0.14);
   margin-bottom: 12px;
 }
-.ohih-title{
-  font-size: 26px;
-  font-weight: 800;
-  letter-spacing: .2px;
-  margin: 0;
-}
-.ohih-sub{
-  margin-top: 4px;
-  font-size: 13px;
-  opacity: .92;
-}
-.ohih-badges{
-  display:flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 10px;
-}
+.ohih-title{ font-size: 26px; font-weight: 800; letter-spacing: .2px; margin: 0; }
+.ohih-sub{ margin-top: 4px; font-size: 13px; opacity: .92; }
+.ohih-badges{ display:flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .ohih-badge{
-  display:inline-flex;
-  align-items:center;
-  gap:6px;
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: rgba(255,255,255,.16);
-  border: 1px solid rgba(255,255,255,.22);
-  font-size: 12px;
-  font-weight: 600;
+  display:inline-flex; align-items:center; gap:6px; padding: 6px 10px;
+  border-radius: 999px; background: rgba(255,255,255,.16);
+  border: 1px solid rgba(255,255,255,.22); font-size: 12px; font-weight: 600;
 }
-.ohih-kpis{
-  display:flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 12px;
-}
+.ohih-kpis{ display:flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
 .ohih-kpi{
-  background: rgba(255,255,255,.12);
-  border: 1px solid rgba(255,255,255,.20);
-  border-radius: 14px;
-  padding: 10px 12px;
-  min-width: 160px;
+  background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.20);
+  border-radius: 14px; padding: 10px 12px; min-width: 160px;
 }
-.ohih-kpi .k{
-  font-size: 11px;
-  opacity: .90;
-  margin-bottom: 4px;
-}
-.ohih-kpi .v{
-  font-size: 18px;
-  font-weight: 800;
-}
-.ohih-kpi .s{
-  font-size: 11px;
-  opacity: .90;
-  margin-top: 2px;
-}
+.ohih-kpi .k{ font-size: 11px; opacity: .90; margin-bottom: 4px; }
+.ohih-kpi .v{ font-size: 18px; font-weight: 800; }
+.ohih-kpi .s{ font-size: 11px; opacity: .90; margin-top: 2px; }
 
 /* --- Section header --- */
 .ohih-section{
-  padding: 10px 12px;
-  border-radius: 14px;
-  border: 1px solid rgba(2,6,23,.10);
-  background: rgba(255,255,255,.70);
-  box-shadow: 0 8px 18px rgba(2,6,23,.06);
-  margin: 8px 0 12px 0;
+  padding: 10px 12px; border-radius: 14px;
+  border: 1px solid rgba(2,6,23,.10); background: rgba(255,255,255,.70);
+  box-shadow: 0 8px 18px rgba(2,6,23,.06); margin: 8px 0 12px 0;
 }
-.ohih-section h2{
-  margin: 0;
-  font-size: 20px;
-  font-weight: 800;
-}
+.ohih-section h2{ margin: 0; font-size: 20px; font-weight: 800; }
 
 /* --- Alert cards --- */
 .ohih-alert{
-  border-radius: 16px;
-  padding: 12px 14px;
+  border-radius: 16px; padding: 12px 14px;
   border: 1px solid rgba(2,6,23,.12);
   box-shadow: 0 10px 24px rgba(2,6,23,.08);
   margin: 10px 0 12px 0;
@@ -122,11 +75,7 @@ st.markdown(
 .ohih-alert.critical{ background: rgba(220,38,38,.16); border-color: rgba(220,38,38,.35); }
 
 /* --- Subtle divider --- */
-hr{
-  border: none;
-  border-top: 1px solid rgba(2,6,23,.10);
-  margin: 12px 0;
-}
+hr{ border: none; border-top: 1px solid rgba(2,6,23,.10); margin: 12px 0; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -466,13 +415,11 @@ def _sigmoid(x: float) -> float:
 
 
 def _get_bool(df: pd.DataFrame, col: str) -> pd.Series:
-    """Return boolean series safely even if column missing."""
     if col not in df.columns:
         return pd.Series([False] * len(df))
     v = df[col]
     if v.dtype == bool:
         return v.fillna(False)
-    # accept "true/false", 1/0, "t/f"
     s = v.astype(str).str.strip().str.lower()
     return s.isin(["true", "t", "1", "yes", "y"])
 
@@ -483,17 +430,7 @@ def _get_num(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
     return pd.to_numeric(df[col], errors="coerce").fillna(default)
 
 
-def _is_confirmed_row(row_cat: str, row_genx: str) -> bool:
-    cat = (row_cat or "").strip().upper()
-    gx = (row_genx or "").strip().lower()
-    return (cat == "CONFIRMED TB") or (gx == "positive")
-
-
 def _ai_driver_definitions() -> List[Tuple[str, str, int]]:
-    """
-    (column_name, label, weight)
-    weights roughly match your screening logic importance.
-    """
     return [
         ("sx_cough_2w", "Cough ≥ 2 weeks", 3),
         ("sx_hemoptysis", "Hemoptysis", 3),
@@ -518,15 +455,6 @@ def _ai_driver_definitions() -> List[Tuple[str, str, int]]:
 
 
 def _presumptive_weight(screening_score: float, screening_band: str, category: str, tb_prob: float) -> float:
-    """
-    Weight presumptives by screening_score:
-    - base 0.15
-    - +0.05 per score point up to 10 (max +0.50)
-    - +0.15 if HIGH band
-    - +0.10 if category HIGH
-    - +0.10 if tb_probability >= 0.60
-    cap to 0.90
-    """
     s = float(screening_score or 0.0)
     b = (screening_band or "").upper()
     cat = (category or "").upper()
@@ -542,39 +470,39 @@ def _presumptive_weight(screening_score: float, screening_band: str, category: s
     return float(max(0.0, min(0.90, w)))
 
 
-def _compute_top_drivers(dfe: pd.DataFrame, days_window: int = 30, top_n: int = 6) -> List[str]:
-    """
-    From last N days of (confirmed + high presumptive) events,
-    compute top drivers by contribution = count_true * weight.
-    Return list of friendly strings.
-    """
-    if dfe is None or dfe.empty:
-        return []
-
-    if "timestamp_dt" not in dfe.columns:
-        return []
-
+def _focus_events_for_drivers(df: pd.DataFrame, days_window: int = 30) -> pd.DataFrame:
+    if df is None or df.empty or "timestamp_dt" not in df.columns:
+        return pd.DataFrame()
     cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days_window)
-    df = dfe[dfe["timestamp_dt"] >= cutoff].copy()
+    df = df[df["timestamp_dt"] >= cutoff].copy()
     if df.empty:
-        return []
+        return df
 
-    # focus on "signal" events: confirmed OR HIGH presumptive
     band = df.get("screening_band", pd.Series([""] * len(df))).astype(str).str.upper()
     cat = df.get("category", pd.Series([""] * len(df))).astype(str).str.upper()
     genx = df.get("genexpert", pd.Series([""] * len(df))).astype(str).str.lower()
 
     is_confirmed = (cat == "CONFIRMED TB") | (genx == "positive")
     is_high_presumptive = band.str.contains("HIGH") | (cat == "HIGH")
-    focus = df[is_confirmed | is_high_presumptive].copy()
+    return df[is_confirmed | is_high_presumptive].copy()
+
+
+def _compute_driver_breakdown(dfe_fac: pd.DataFrame, days_window: int = 30) -> pd.DataFrame:
+    """
+    Returns a dataframe:
+      driver, weight, count, pct, contribution (=count*weight)
+    computed from last N days of confirmed/high-presumptive events.
+    """
+    if dfe_fac is None or dfe_fac.empty:
+        return pd.DataFrame(columns=["driver", "weight", "count", "pct", "contribution"])
+
+    focus = _focus_events_for_drivers(dfe_fac, days_window=days_window)
     if focus.empty:
-        return []
+        return pd.DataFrame(columns=["driver", "weight", "count", "pct", "contribution"])
 
-    drivers = _ai_driver_definitions()
-    rows = []
     n = len(focus)
-
-    for col, label, wt in drivers:
+    rows = []
+    for col, label, wt in _ai_driver_definitions():
         if col not in focus.columns:
             continue
         b = _get_bool(focus, col)
@@ -582,26 +510,41 @@ def _compute_top_drivers(dfe: pd.DataFrame, days_window: int = 30, top_n: int = 
         if cnt <= 0:
             continue
         pct = 100.0 * cnt / max(1, n)
-        contrib = cnt * wt
-        rows.append((contrib, cnt, pct, label))
+        rows.append(
+            {
+                "driver": label,
+                "weight": int(wt),
+                "count": int(cnt),
+                "pct": float(pct),
+                "contribution": float(cnt * wt),
+            }
+        )
 
-    rows.sort(reverse=True, key=lambda x: x[0])
-    rows = rows[:top_n]
-    return [f"{label} ({pct:.0f}%)" for _, _, pct, label in rows]
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=["driver", "weight", "count", "pct", "contribution"])
+
+    df = df.sort_values("contribution", ascending=False).reset_index(drop=True)
+    return df
+
+
+def _compute_top_drivers_text(dfe_fac: pd.DataFrame, days_window: int = 30, top_n: int = 6) -> str:
+    df = _compute_driver_breakdown(dfe_fac, days_window=days_window)
+    if df.empty:
+        return "Insufficient driver data"
+    df = df.head(top_n).copy()
+    return ", ".join([f"{r.driver} ({r.pct:.0f}%)" for r in df.itertuples(index=False)])
 
 
 def _ai_predict_hotspots(days_back: int = 120) -> pd.DataFrame:
     """
-    Predict next 7-day TB surge per facility using a TB-SIGNAL time series:
+    Predict next 7-day TB surge per facility using TB-SIGNAL time series:
       TB_SIGNAL = confirmed(1.0) + presumptive_weight(0.0–0.9)
-    Where presumptive_weight depends on screening_score, band, category, tb_probability.
-
     Output includes:
       predicted_next7d_signal, predicted_next7d_confirmed (approx),
-      ai_risk_prob, ai_level, growth, top_drivers (string)
+      ai_risk_prob, ai_level, growth, top_drivers
     """
     try:
-        # safest: select "*" so we don't crash if schema changed
         dfe = df_select("events", {"select": "*", "limit": "50000"})
         if dfe.empty:
             return pd.DataFrame()
@@ -609,12 +552,10 @@ def _ai_predict_hotspots(days_back: int = 120) -> pd.DataFrame:
         if "facility_id" not in dfe.columns or "timestamp" not in dfe.columns:
             return pd.DataFrame()
 
-        # Role filter
         is_org = st.session_state.get("role") == "organizer"
         if not is_org:
             dfe = dfe[dfe["facility_id"].astype(str) == str(facility_id)]
 
-        # Parse timestamp and filter time window
         dfe["timestamp_dt"] = pd.to_datetime(dfe["timestamp"], errors="coerce", utc=True)
         dfe = dfe[dfe["timestamp_dt"].notna()]
         cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days_back)
@@ -622,53 +563,40 @@ def _ai_predict_hotspots(days_back: int = 120) -> pd.DataFrame:
         if dfe.empty:
             return pd.DataFrame()
 
-        # standardize fields (safe)
         cat = dfe.get("category", pd.Series([""] * len(dfe))).astype(str)
         genx = dfe.get("genexpert", pd.Series([""] * len(dfe))).astype(str)
         band = dfe.get("screening_band", pd.Series([""] * len(dfe))).astype(str)
         score = _get_num(dfe, "screening_score", 0.0)
         tbp = _get_num(dfe, "tb_probability", 0.0)
 
-        # confirmed
-        is_conf = ((cat.astype(str).str.upper() == "CONFIRMED TB") | (genx.astype(str).str.lower() == "positive"))
-
-        # presumptive = (HIGH/MODERATE category) OR ("HIGH" band) OR (tb_probability >= 0.5)
+        is_conf = (cat.astype(str).str.upper() == "CONFIRMED TB") | (genx.astype(str).str.lower() == "positive")
         is_pres = (
             cat.astype(str).str.upper().isin(["HIGH", "MODERATE"])
             | band.astype(str).str.upper().str.contains("HIGH")
             | (tbp >= 0.50)
         )
-
-        # avoid double count
         is_pres = is_pres & (~is_conf)
 
-        # compute presumptive weight per row
         pres_w = []
         for s, b, c, p in zip(score.tolist(), band.tolist(), cat.tolist(), tbp.tolist()):
             pres_w.append(_presumptive_weight(s, b, c, p))
         pres_w = pd.Series(pres_w)
 
-        # TB_SIGNAL
         dfe["tb_signal"] = (is_conf.astype(float) * 1.0) + (is_pres.astype(float) * pres_w)
 
-        # Week buckets
         dfe["week_start"] = dfe["timestamp_dt"].dt.to_period("W-MON").dt.start_time
-        wk = dfe.groupby(["facility_id", "week_start"]).agg(
-            tb_signal_week=("tb_signal", "sum"),
-            confirmed_week=(lambda x: 0, "size"),  # placeholder, we'll recompute below
-        ).reset_index()
 
-        # recompute confirmed_week properly
+        wk = dfe.groupby(["facility_id", "week_start"]).agg(tb_signal_week=("tb_signal", "sum")).reset_index()
+
         conf_only = dfe[is_conf].copy()
         if not conf_only.empty:
             conf_only["week_start"] = conf_only["timestamp_dt"].dt.to_period("W-MON").dt.start_time
             wk_conf = conf_only.groupby(["facility_id", "week_start"]).size().reset_index(name="confirmed_week")
-            wk = wk.drop(columns=["confirmed_week"], errors="ignore").merge(wk_conf, on=["facility_id", "week_start"], how="left")
+            wk = wk.merge(wk_conf, on=["facility_id", "week_start"], how="left")
         wk["confirmed_week"] = pd.to_numeric(wk.get("confirmed_week"), errors="coerce").fillna(0).astype(int)
 
-        # Add facility metadata if possible
         try:
-            dff = df_select("facilities", {"select": "facility_id,facility_name,state,lga", "limit": "50000"})
+            dff = df_select("facilities", {"select": "facility_id,facility_name,state,lga,latitude,longitude", "limit": "50000"})
         except Exception:
             dff = pd.DataFrame()
 
@@ -695,12 +623,8 @@ def _ai_predict_hotspots(days_back: int = 120) -> pd.DataFrame:
             growth = max(0.60, min(1.90, float(growth)))
 
             pred_signal = max(0, int(round(base * growth)))
-
-            # approximate confirmed from signal (conservative)
-            # (signal includes presumptives, so confirmed prediction <= signal)
             pred_confirmed = max(0, int(round(min(pred_signal, 0.65 * pred_signal + 0.35 * last_c))))
 
-            # Probability: driven by signal and growth and confirmed change
             import math
             score_ai = (pred_signal - 2.2) + 1.6 * math.log1p(max(0.0, growth - 1.0)) + 0.35 * (last_c - prev_c)
             prob = float(_sigmoid(score_ai))
@@ -714,10 +638,8 @@ def _ai_predict_hotspots(days_back: int = 120) -> pd.DataFrame:
             else:
                 level = "LOW"
 
-            # drivers for THIS facility
             dfe_fac = dfe[dfe["facility_id"].astype(str) == str(fac)].copy()
-            drivers_list = _compute_top_drivers(dfe_fac, days_window=30, top_n=6)
-            drivers_str = ", ".join(drivers_list) if drivers_list else "Insufficient driver data"
+            drivers_str = _compute_top_drivers_text(dfe_fac, days_window=30, top_n=6)
 
             out_rows.append(
                 {
@@ -758,7 +680,6 @@ def _render_ai_banner_for_facility(dfp: pd.DataFrame):
         return
 
     is_org = st.session_state.get("role") == "organizer"
-
     if is_org:
         row = dfp.iloc[0].to_dict()
         fac_label = row.get("facility_name") or row.get("facility_id")
@@ -788,7 +709,6 @@ def _render_ai_banner_for_facility(dfp: pd.DataFrame):
     elif level == "CRITICAL":
         css = "critical"
 
-    actions = []
     if level in ("HIGH", "CRITICAL"):
         actions = [
             "Increase rapid cough screening at triage/OPD (all adults)",
@@ -827,6 +747,94 @@ def _render_ai_banner_for_facility(dfp: pd.DataFrame):
     )
 
 
+def _render_driver_chart(dfe_all_events: pd.DataFrame, facility_id_selected: str, days_window: int = 30):
+    if dfe_all_events is None or dfe_all_events.empty:
+        st.info("No event data to compute drivers.")
+        return
+
+    df_fac = dfe_all_events[dfe_all_events["facility_id"].astype(str) == str(facility_id_selected)].copy()
+    if df_fac.empty:
+        st.info("No events for selected facility.")
+        return
+
+    df_fac["timestamp_dt"] = pd.to_datetime(df_fac.get("timestamp"), errors="coerce", utc=True)
+    df_fac = df_fac[df_fac["timestamp_dt"].notna()]
+
+    drv = _compute_driver_breakdown(df_fac, days_window=days_window)
+    if drv.empty:
+        st.info("Not enough driver data yet (need confirmed or high presumptive events).")
+        return
+
+    st.subheader("Top drivers (symptoms/risk factors) contributing to AI risk")
+    st.caption(f"Computed from last {days_window} days of CONFIRMED or HIGH presumptive events. Contribution = count × weight.")
+    top = drv.head(12).copy()
+
+    if px is not None:
+        fig = px.bar(top, x="contribution", y="driver", orientation="h", hover_data=["count", "pct", "weight"])
+        fig.update_layout(height=420, margin={"l": 0, "r": 0, "t": 30, "b": 0})
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        # fallback
+        st.bar_chart(top.set_index("driver")["contribution"])
+
+    st.dataframe(top[["driver", "count", "pct", "weight", "contribution"]], use_container_width=True, hide_index=True)
+
+
+def _render_ai_map_overlay(dfp: pd.DataFrame):
+    section("AI Map Overlay")
+    st.caption("Predicted hotspot risk overlay (requires facilities.latitude and facilities.longitude).")
+
+    if px is None:
+        st.error("Plotly not installed. Add 'plotly' to requirements.txt then redeploy.")
+        return
+
+    if dfp is None or dfp.empty:
+        st.info("No AI prediction rows yet.")
+        return
+
+    # ensure coords
+    if "latitude" not in dfp.columns or "longitude" not in dfp.columns:
+        st.warning("Facilities coordinates not found in merged AI table.")
+        return
+
+    dfm = dfp.copy()
+    dfm["latitude"] = pd.to_numeric(dfm["latitude"], errors="coerce")
+    dfm["longitude"] = pd.to_numeric(dfm["longitude"], errors="coerce")
+    dfm = dfm.dropna(subset=["latitude", "longitude"])
+
+    if dfm.empty:
+        st.warning("No facilities have coordinates yet. Add latitude/longitude in facilities table.")
+        st.markdown("Quick fix SQL example (edit values):")
+        st.code(
+            f"""
+update public.facilities
+set state='Rivers', lga='Port Harcourt', latitude=4.8156, longitude=7.0498
+where facility_id='{facility_id}';
+"""
+        )
+        return
+
+    # Map overlay: size=predicted signal, color=risk %
+    hover_cols = {}
+    for c in ["facility_name", "state", "lga", "ai_level", "ai_risk_pct", "predicted_next7d_signal", "predicted_next7d_confirmed", "top_drivers"]:
+        if c in dfm.columns:
+            hover_cols[c] = True
+
+    fig = px.scatter_mapbox(
+        dfm,
+        lat="latitude",
+        lon="longitude",
+        size="predicted_next7d_signal" if "predicted_next7d_signal" in dfm.columns else None,
+        color="ai_risk_pct" if "ai_risk_pct" in dfm.columns else None,
+        hover_name="facility_name" if "facility_name" in dfm.columns else "facility_id",
+        hover_data=hover_cols,
+        zoom=4.2,
+        height=560,
+    )
+    fig.update_layout(mapbox_style="open-street-map", margin={"l": 0, "r": 0, "t": 0, "b": 0})
+    st.plotly_chart(fig, use_container_width=True)
+
+
 # =========================
 # PAGES
 # =========================
@@ -852,6 +860,9 @@ def page_home():
 
         st.caption("Top predicted hotspot facilities (AI, next 7 days). TB signal = confirmed + weighted presumptives.")
         st.dataframe(dfp[show_cols].head(10), use_container_width=True, hide_index=True)
+
+    # Map overlay on Home (nice!)
+    _render_ai_map_overlay(dfp)
 
 
 def page_patients():
@@ -903,17 +914,14 @@ def page_diagnosis_events():
     cxr = st.selectbox("CXR", ["Not done", "Suggestive", "Not suggestive"])
     notes = st.text_area("Notes")
 
-    # ✅ Screening symptoms
     st.markdown("### TB Screening Symptoms")
     col1, col2 = st.columns(2)
-
     with col1:
         sx_cough_2w = st.checkbox("Cough ≥ 2 weeks")
         sx_fever = st.checkbox("Fever")
         sx_night_sweats = st.checkbox("Night sweats")
         sx_weight_loss = st.checkbox("Weight loss")
         sx_hemoptysis = st.checkbox("Hemoptysis")
-
     with col2:
         sx_chest_pain = st.checkbox("Chest pain / breathlessness")
         rf_contact_tb = st.checkbox("Contact with TB case")
@@ -921,16 +929,13 @@ def page_diagnosis_events():
         rf_diabetes = st.checkbox("Diabetes (risk)")
         rf_malnutrition = st.checkbox("Malnutrition / underweight (risk)")
 
-    # ✅ Comorbidities / risk factors
     st.markdown("### Comorbidities / Risk Factors")
     col3, col4 = st.columns(2)
-
     with col3:
         comorbid_hiv = st.checkbox("HIV positive")
         comorbid_diabetes = st.checkbox("Diabetes (comorbidity)")
         comorbid_malnutrition = st.checkbox("Malnutrition")
         comorbid_smoking = st.checkbox("Smoking")
-
     with col4:
         comorbid_alcohol = st.checkbox("Alcohol use")
         comorbid_ckd = st.checkbox("Chronic kidney disease (CKD)")
@@ -938,7 +943,6 @@ def page_diagnosis_events():
         comorbid_cancer = st.checkbox("Cancer")
         comorbid_immunosuppressed = st.checkbox("Immunosuppressed (steroids/transplant)")
 
-    # ✅ Decision support
     score = 0
     score += 3 if sx_cough_2w else 0
     score += 1 if sx_fever else 0
@@ -1009,19 +1013,16 @@ def page_diagnosis_events():
             "cxr": cxr,
             "notes": notes.strip(),
             "timestamp": now_iso(),
-            # Symptoms
             "sx_cough_2w": sx_cough_2w,
             "sx_fever": sx_fever,
             "sx_night_sweats": sx_night_sweats,
             "sx_weight_loss": sx_weight_loss,
             "sx_hemoptysis": sx_hemoptysis,
             "sx_chest_pain": sx_chest_pain,
-            # Risks
             "rf_contact_tb": rf_contact_tb,
             "rf_prev_tb": rf_prev_tb,
             "rf_diabetes": rf_diabetes,
             "rf_malnutrition": rf_malnutrition,
-            # Comorbidities
             "comorbid_hiv": comorbid_hiv,
             "comorbid_diabetes": comorbid_diabetes,
             "comorbid_malnutrition": comorbid_malnutrition,
@@ -1031,7 +1032,6 @@ def page_diagnosis_events():
             "comorbid_copd": comorbid_copd,
             "comorbid_cancer": comorbid_cancer,
             "comorbid_immunosuppressed": comorbid_immunosuppressed,
-            # Decision outputs
             "screening_score": int(score),
             "screening_band": screening_band,
             "recommendation": recommendation,
@@ -1539,6 +1539,33 @@ def page_ai_prediction():
 
     st.subheader("Predicted hotspot ranking")
     st.dataframe(dfp[show_cols].head(50), use_container_width=True, hide_index=True)
+
+    # ---- Driver chart for a selected facility ----
+    section("Drivers Chart (Why AI is High)")
+    if "facility_name" in dfp.columns:
+        labels = (dfp["facility_id"].astype(str) + " — " + dfp["facility_name"].fillna("").astype(str)).tolist()
+    else:
+        labels = dfp["facility_id"].astype(str).tolist()
+
+    default_label = None
+    if st.session_state.get("role") != "organizer":
+        # auto-select own facility
+        for lab in labels:
+            if lab.startswith(str(facility_id)):
+                default_label = lab
+                break
+
+    chosen = st.selectbox("Select facility to view driver chart", labels, index=(labels.index(default_label) if default_label in labels else 0))
+    fac_sel = chosen.split(" — ")[0].strip()
+
+    # load events once for chart
+    dfe_all = df_select("events", {"select": "*", "limit": "50000"})
+    if st.session_state.get("role") != "organizer":
+        dfe_all = dfe_all[dfe_all["facility_id"].astype(str) == str(facility_id)]
+    _render_driver_chart(dfe_all, fac_sel, days_window=30)
+
+    # ---- Map overlay in AI page ----
+    _render_ai_map_overlay(dfp)
 
 
 def page_exports():
