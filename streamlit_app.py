@@ -1264,59 +1264,122 @@ def page_national_view():
     st.subheader("Events")
     st.dataframe(df_evt, use_container_width=True, hide_index=True)
 
-# =========================
-# MENU + ROUTER
-# =========================
-menu = [
-    f"{TB_ICON} Home",
-    f"{TB_ICON} AI Prediction",
-    f"{TB_ICON} Patients",
-    f"{TB_ICON} Diagnosis Events",
-    f"{TB_ICON} DOTS",
-    f"{TB_ICON} Adherence",
-    f"{TB_ICON} Treatment",
-    f"{TB_ICON} Contact Tracing",
-    f"{TB_ICON} Drug Resistance",
-    f"{TB_ICON} GeneXpert Import",
-    f"{TB_ICON} WHO Dashboard",
-    f"{TB_ICON} GIS Heatmap",
-    f"{TB_ICON} Outbreak Alerts",
-    f"{TB_ICON} Exports",
-]
-if is_organizer():
-    menu.append(f"{TB_ICON} National View")
+# ============================================================
+# ROLE BASED ACCESS CONTROL + MENU SYSTEM
+# ============================================================
+
+role = str(st.session_state.get("role", "viewer")).lower()
+
+ROLE_PERMISSIONS = {
+
+    "organizer": [
+        "Home","Patients","Diagnosis Events","DOTS","Adherence",
+        "Treatment","Contact Tracing","Drug Resistance",
+        "GeneXpert Import","WHO Dashboard","GIS Heatmap",
+        "Outbreak Alerts","Exports","National View"
+    ],
+
+    "facility_admin": [
+        "Home","Patients","Diagnosis Events","DOTS","Adherence",
+        "Treatment","Contact Tracing","Drug Resistance",
+        "GeneXpert Import","WHO Dashboard","GIS Heatmap",
+        "Outbreak Alerts","Exports"
+    ],
+
+    "clinician":[
+        "Home","Patients","Diagnosis Events","DOTS",
+        "Adherence","Treatment","Contact Tracing",
+        "WHO Dashboard","GIS Heatmap","Outbreak Alerts"
+    ],
+
+    "lab":[
+        "Home","Drug Resistance","GeneXpert Import",
+        "WHO Dashboard","GIS Heatmap","Outbreak Alerts"
+    ],
+
+    "pharmacy":[
+        "Home","DOTS","Adherence","Treatment",
+        "WHO Dashboard","GIS Heatmap","Outbreak Alerts"
+    ],
+
+    "dots_officer":[
+        "Home","DOTS","Adherence",
+        "WHO Dashboard","GIS Heatmap","Outbreak Alerts"
+    ],
+
+    "data_entry":[
+        "Home","Patients",
+        "WHO Dashboard","GIS Heatmap","Outbreak Alerts"
+    ],
+
+    "viewer":[
+        "Home","WHO Dashboard","GIS Heatmap",
+        "Outbreak Alerts","Exports"
+    ]
+
+}
+
+# get allowed pages
+allowed_pages = ROLE_PERMISSIONS.get(role, ROLE_PERMISSIONS["viewer"])
+
+# build menu with icon
+menu = [f"{TB_ICON} {p}" for p in allowed_pages]
 
 page = st.sidebar.radio("Menu", menu)
 
-if page.endswith("Home"):
+# remove icon
+page_clean = page.replace(TB_ICON,"").strip()
+
+# ============================================================
+# ROUTER
+# ============================================================
+
+if page_clean == "Home":
     page_home()
-elif page.endswith("AI Prediction"):
-    page_ai_prediction()
-elif page.endswith("Patients"):
+
+elif page_clean == "Patients":
     page_patients()
-elif page.endswith("Diagnosis Events"):
+
+elif page_clean == "Diagnosis Events":
     page_diagnosis_events()
-elif page.endswith("DOTS"):
+
+elif page_clean == "DOTS":
     page_dots()
-elif page.endswith("Adherence"):
+
+elif page_clean == "Adherence":
     page_adherence()
-elif page.endswith("Treatment"):
+
+elif page_clean == "Treatment":
     page_treatment()
-elif page.endswith("Contact Tracing"):
+
+elif page_clean == "Contact Tracing":
     page_contact_tracing()
-elif page.endswith("Drug Resistance"):
+
+elif page_clean == "Drug Resistance":
     page_drug_resistance()
-elif page.endswith("GeneXpert Import"):
+
+elif page_clean == "GeneXpert Import":
     page_genexpert_import()
-elif page.endswith("WHO Dashboard"):
+
+elif page_clean == "WHO Dashboard":
     page_who_dashboard()
-elif page.endswith("GIS Heatmap"):
+
+elif page_clean == "GIS Heatmap":
     page_gis_heatmap()
-elif page.endswith("Outbreak Alerts"):
+
+elif page_clean == "Outbreak Alerts":
     page_outbreak_alerts()
-elif page.endswith("Exports"):
+
+elif page_clean == "Exports":
     page_exports()
-elif page.endswith("National View"):
+
+elif page_clean == "National View":
+
+    if role != "organizer":
+        st.error("⛔ Only national organizers can access this page")
+        st.stop()
+
     page_national_view()
+
 else:
     page_home()
