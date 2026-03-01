@@ -224,6 +224,7 @@ def safe_select_with_order(table: str, base_params: Dict[str, str], order_candid
 # AUTH (CLEAN + RELIABLE)
 # =========================
 def auth_sign_in(email: str, password: str) -> Dict[str, Any]:
+    # grant_type sent via params (works reliably with Supabase)
     url = f"{AUTH_BASE}/token"
     params = {"grant_type": "password"}
     payload = {"email": email, "password": password}
@@ -436,11 +437,97 @@ def classify_resistance(rr: bool, inh: bool, fq: bool, bdq: bool, lzd: bool) -> 
 
 
 # =========================
+# OUTBREAK BANNER (SHOW ON HOME)
+# =========================
+def get_hotspot_rows() -> pd.DataFrame:
+    """
+    Reads v_hotspots. Organizer sees all; others see their facility only.
+    """
+    try:
+        dfh = df_select("v_hotspots", {"select": "*", "limit": "50000"})
+        if dfh.empty:
+            return dfh
+        if st.session_state.get("role") != "organizer" and "facility_id" in dfh.columns:
+            dfh = dfh[dfh["facility_id"].astype(str) == str(facility_id)]
+        return dfh
+    except Exception:
+        return pd.DataFrame([])
+
+
+def render_outbreak_banner():
+    """
+    Shows the most severe hotspot (WATCH/HIGH/CRITICAL) as a banner.
+    If no hotspot exists, shows nothing (no noise).
+    """
+    dfh = get_hotspot_rows()
+    if dfh.empty:
+        return
+
+    if "hotspot_level" not in dfh.columns:
+        return
+
+    dfh = dfh[dfh["hotspot_level"].isin(["WATCH", "HIGH", "CRITICAL"])].copy()
+    if dfh.empty:
+        return
+
+    # pick the worst hotspot
+    rank = {"CRITICAL": 3, "HIGH": 2, "WATCH": 1}
+    dfh["rank"] = dfh["hotspot_level"].map(rank).fillna(0).astype(int)
+
+    # Ensure numeric ordering fields exist
+    if "confirmed_7d" in dfh.columns:
+        dfh["confirmed_7d"] = pd.to_numeric(dfh["confirmed_7d"], errors="coerce").fillna(0)
+    else:
+        dfh["confirmed_7d"] = 0
+    if "ratio" in dfh.columns:
+        dfh["ratio"] = pd.to_numeric(dfh["ratio"], errors="coerce").fillna(0)
+    else:
+        dfh["ratio"] = 0
+    if "confirmed_prev_28d" in dfh.columns:
+        dfh["confirmed_prev_28d"] = pd.to_numeric(dfh["confirmed_prev_28d"], errors="coerce").fillna(0)
+    else:
+        dfh["confirmed_prev_28d"] = 0
+
+    worst = dfh.sort_values(["rank", "confirmed_7d", "ratio"], ascending=False).iloc[0].to_dict()
+
+    level = str(worst.get("hotspot_level", "WATCH"))
+    fac = str(worst.get("facility_name", "—"))
+    state = str(worst.get("state", "—"))
+    lga = str(worst.get("lga", "—"))
+    c7 = int(worst.get("confirmed_7d", 0) or 0)
+    c28 = int(worst.get("confirmed_prev_28d", 0) or 0)
+    ratio = worst.get("ratio", 0)
+
+    if level == "CRITICAL":
+        st.error(
+            f"🚨 **TB HOTSPOT DETECTED (CRITICAL)** — {fac} ({lga}, {state}) | "
+            f"Confirmed TB last 7 days: **{c7}** | Prev 28 days: **{c28}** | Ratio: **{ratio}x**\n\n"
+            f"**Action:** Activate rapid response, intensify screening + GeneXpert, contact tracing, IPC now."
+        )
+    elif level == "HIGH":
+        st.warning(
+            f"⚠️ **TB HOTSPOT WARNING (HIGH)** — {fac} ({lga}, {state}) | "
+            f"Confirmed TB last 7 days: **{c7}** | Prev 28 days: **{c28}** | Ratio: **{ratio}x**\n\n"
+            f"**Action:** Scale screening, prioritize GeneXpert, review clustering."
+        )
+    else:
+        st.info(
+            f"👀 **TB HOTSPOT WATCH** — {fac} ({lga}, {state}) | "
+            f"Confirmed TB last 7 days: **{c7}** | Prev 28 days: **{c28}** | Ratio: **{ratio}x**\n\n"
+            f"**Action:** Monitor; re-check in 48–72 hours."
+        )
+
+
+# =========================
 # PAGES
 # =========================
 def page_home():
     render_topbar()
     section("Home")
+
+    # ✅ Outbreak detection banner on Home
+    render_outbreak_banner()
+
     st.success("✅ Authenticated. RLS isolates data per facility. WHO Dashboard + GIS + Alerts enabled.")
     st.write("Facility ID:", facility_id)
     st.write("Role:", st.session_state.get("role"))
@@ -473,7 +560,11 @@ def page_patients():
             st.success(f"Saved ✅ Patient: {out.get('patient_id')}")
             st.rerun()
 
-    dfp = safe_select_with_order("patients", {"select": "*", "limit": "5000"}, ["created_at.desc", "updated_at.desc", "patient_id.desc"])
+    dfp = safe_select_with_order(
+        "patients",
+        {"select": "*", "limit": "5000"},
+        ["created_at.desc", "updated_at.desc", "patient_id.desc"],
+    )
     st.dataframe(dfp, use_container_width=True, hide_index=True)
 
 
@@ -619,7 +710,7 @@ def page_diagnosis_events():
             "comorbid_copd": comorbid_copd,
             "comorbid_cancer": comorbid_cancer,
             "comorbid_immunosuppressed": comorbid_immunosuppressed,
-            # Decision outputs
+            # Decision outputs (only save if your DB has these columns)
             "screening_score": int(score),
             "screening_band": screening_band,
             "recommendation": recommendation,
@@ -629,7 +720,11 @@ def page_diagnosis_events():
         st.success("Saved ✅")
         st.rerun()
 
-    dfe = safe_select_with_order("events", {"select": "*", "limit": "5000"}, ["timestamp.desc", "created_at.desc", "event_id.desc"])
+    dfe = safe_select_with_order(
+        "events",
+        {"select": "*", "limit": "5000"},
+        ["timestamp.desc", "created_at.desc", "event_id.desc"],
+    )
     st.dataframe(dfe, use_container_width=True, hide_index=True)
 
 
@@ -658,13 +753,18 @@ def page_dots():
             st.success("Saved ✅")
             st.rerun()
         else:
+            # if duplicate, update WITHOUT requiring updated_at column
             if "duplicate key" in r.text.lower() or r.status_code == 409:
-                match = {"facility_id": f"eq.{facility_id}", "patient_id": f"eq.{pid}", "date": f"eq.{date.isoformat()}"}
+                match = {
+                    "facility_id": f"eq.{facility_id}",
+                    "patient_id": f"eq.{pid}",
+                    "date": f"eq.{date.isoformat()}",
+                }
                 rp = rest_patch(
                     "dots_daily",
                     st.session_state["access_token"],
                     match,
-                    {"dose_taken": bool(dose_taken), "note": note.strip(), "updated_at": now_iso()},
+                    {"dose_taken": bool(dose_taken), "note": note.strip()},
                 )
                 if rp.status_code in (200, 204):
                     st.success("Updated ✅")
@@ -717,7 +817,11 @@ def page_adherence():
         st.success("Saved ✅")
         st.rerun()
 
-    dfa = safe_select_with_order("adherence", {"select": "*", "limit": "5000"}, ["timestamp.desc", "created_at.desc", "created_by.desc"])
+    dfa = safe_select_with_order(
+        "adherence",
+        {"select": "*", "limit": "5000"},
+        ["timestamp.desc", "created_at.desc", "created_by.desc"],
+    )
     st.dataframe(dfa, use_container_width=True, hide_index=True)
 
 
