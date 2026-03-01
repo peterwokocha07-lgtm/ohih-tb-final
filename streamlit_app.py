@@ -487,6 +487,24 @@ def page_diagnosis_events():
     cxr = st.selectbox("CXR", ["Not done", "Suggestive", "Not suggestive"])
     notes = st.text_area("Notes")
 
+    st.markdown("### TB Screening Symptoms")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    sx_cough_2w = st.checkbox("Cough ≥ 2 weeks")
+    sx_fever = st.checkbox("Fever")
+    sx_night_sweats = st.checkbox("Night sweats")
+    sx_weight_loss = st.checkbox("Weight loss")
+    sx_hemoptysis = st.checkbox("Hemoptysis")
+
+with col2:
+    sx_chest_pain = st.checkbox("Chest pain / breathlessness")
+    rf_contact_tb = st.checkbox("Contact with TB case")
+    rf_prev_tb = st.checkbox("Previous TB treatment")
+    rf_diabetes = st.checkbox("Diabetes")
+    rf_malnutrition = st.checkbox("Malnutrition / underweight")
+    
     if st.button("Save event", type="primary"):
         payload = {
             "facility_id": facility_id,
