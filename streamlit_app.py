@@ -1,7 +1,7 @@
 import os
 import json
 import datetime as dt
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional
 
 import pandas as pd
 import requests
@@ -16,7 +16,6 @@ except Exception:
 # BRANDING (OHIH-TB) + NATIONAL DASHBOARD LOOK
 # ============================================================
 TB_ICON = "🫁"
-AI_ICON = "🧠"
 APP_SHORT = "OHIH-TB"
 APP_FULL = "One Health Intelligence Hub for TB (OHIH-TB)"
 
@@ -34,53 +33,87 @@ st.markdown(
   box-shadow: 0 10px 28px rgba(0,0,0,0.14);
   margin-bottom: 12px;
 }
-.ohih-title{ font-size: 26px; font-weight: 800; letter-spacing: .2px; margin: 0; }
-.ohih-sub{ margin-top: 4px; font-size: 13px; opacity: .92; }
-.ohih-badges{ display:flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.ohih-title{
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: .2px;
+  margin: 0;
+}
+.ohih-sub{
+  margin-top: 4px;
+  font-size: 13px;
+  opacity: .92;
+}
+.ohih-badges{
+  display:flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
 .ohih-badge{
-  display:inline-flex; align-items:center; gap:6px; padding: 6px 10px;
-  border-radius: 999px; background: rgba(255,255,255,.16);
-  border: 1px solid rgba(255,255,255,.22); font-size: 12px; font-weight: 600;
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.16);
+  border: 1px solid rgba(255,255,255,.22);
+  font-size: 12px;
+  font-weight: 600;
 }
-.ohih-kpis{ display:flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.ohih-kpis{
+  display:flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
 .ohih-kpi{
-  background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.20);
-  border-radius: 14px; padding: 10px 12px; min-width: 160px;
+  background: rgba(255,255,255,.12);
+  border: 1px solid rgba(255,255,255,.20);
+  border-radius: 14px;
+  padding: 10px 12px;
+  min-width: 160px;
 }
-.ohih-kpi .k{ font-size: 11px; opacity: .90; margin-bottom: 4px; }
-.ohih-kpi .v{ font-size: 18px; font-weight: 800; }
-.ohih-kpi .s{ font-size: 11px; opacity: .90; margin-top: 2px; }
+.ohih-kpi .k{
+  font-size: 11px;
+  opacity: .90;
+  margin-bottom: 4px;
+}
+.ohih-kpi .v{
+  font-size: 18px;
+  font-weight: 800;
+}
+.ohih-kpi .s{
+  font-size: 11px;
+  opacity: .90;
+  margin-top: 2px;
+}
 
 /* --- Section header --- */
 .ohih-section{
-  padding: 10px 12px; border-radius: 14px;
-  border: 1px solid rgba(2,6,23,.10); background: rgba(255,255,255,.70);
-  box-shadow: 0 8px 18px rgba(2,6,23,.06); margin: 8px 0 12px 0;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(2,6,23,.10);
+  background: rgba(255,255,255,.70);
+  box-shadow: 0 8px 18px rgba(2,6,23,.06);
+  margin: 8px 0 12px 0;
 }
-.ohih-section h2{ margin: 0; font-size: 20px; font-weight: 800; }
-
-/* --- Alert cards --- */
-.ohih-alert{
-  border-radius: 16px; padding: 12px 14px;
-  border: 1px solid rgba(2,6,23,.12);
-  box-shadow: 0 10px 24px rgba(2,6,23,.08);
-  margin: 10px 0 12px 0;
+.ohih-section h2{
+  margin: 0;
+  font-size: 20px;
+  font-weight: 800;
 }
-.ohih-alert h3{ margin:0; font-size:16px; font-weight:900; }
-.ohih-alert p{ margin:6px 0 0 0; font-size:13px; opacity:.95; }
-.ohih-alert ul{ margin:8px 0 0 16px; font-size:13px; }
-.ohih-alert.low{ background: rgba(34,197,94,.10); }
-.ohih-alert.watch{ background: rgba(245,158,11,.12); }
-.ohih-alert.high{ background: rgba(239,68,68,.12); }
-.ohih-alert.critical{ background: rgba(220,38,38,.16); border-color: rgba(220,38,38,.35); }
 
 /* --- Subtle divider --- */
-hr{ border: none; border-top: 1px solid rgba(2,6,23,.10); margin: 12px 0; }
+hr{
+  border: none;
+  border-top: 1px solid rgba(2,6,23,.10);
+  margin: 12px 0;
+}
 </style>
 """,
     unsafe_allow_html=True,
 )
-
 
 def section(title: str):
     st.markdown(
@@ -91,7 +124,6 @@ def section(title: str):
 """,
         unsafe_allow_html=True,
     )
-
 
 # =========================
 # CONFIG / SECRETS (CLEAN)
@@ -104,7 +136,6 @@ def safe_secret(name: str, default: str = "") -> str:
         pass
     return os.getenv(name, default)
 
-
 SUPABASE_URL = safe_secret("SUPABASE_URL", "").strip()
 SUPABASE_ANON_KEY = safe_secret("SUPABASE_ANON_KEY", "").strip()
 
@@ -115,10 +146,8 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
 AUTH_BASE = f"{SUPABASE_URL}/auth/v1"
 REST_BASE = f"{SUPABASE_URL}/rest/v1"
 
-
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-
 
 # =========================
 # REST HELPERS
@@ -129,11 +158,9 @@ def rest_headers(access_token: str = "") -> Dict[str, str]:
         h["Authorization"] = f"Bearer {access_token}"
     return h
 
-
 def rest_get(table: str, access_token: str, params: Dict[str, str]) -> requests.Response:
     url = f"{REST_BASE}/{table}"
     return requests.get(url, headers=rest_headers(access_token), params=params, timeout=30)
-
 
 def rest_post(table: str, access_token: str, payload: Any) -> requests.Response:
     url = f"{REST_BASE}/{table}"
@@ -141,19 +168,16 @@ def rest_post(table: str, access_token: str, payload: Any) -> requests.Response:
     h["Prefer"] = "return=representation"
     return requests.post(url, headers=h, json=payload, timeout=30)
 
-
 def rest_patch(table: str, access_token: str, match_params: Dict[str, str], payload: Any) -> requests.Response:
     url = f"{REST_BASE}/{table}"
     h = rest_headers(access_token)
     h["Prefer"] = "return=representation"
     return requests.patch(url, headers=h, params=match_params, json=payload, timeout=30)
 
-
 def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     return df
-
 
 def df_select(table: str, params: Dict[str, str]) -> pd.DataFrame:
     tok = st.session_state["access_token"]
@@ -162,7 +186,6 @@ def df_select(table: str, params: Dict[str, str]) -> pd.DataFrame:
         raise RuntimeError(f"{table} load failed: {r.status_code} {r.text}")
     return _clean_df(pd.DataFrame(r.json() or []))
 
-
 def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     tok = st.session_state["access_token"]
     r = rest_post(table, tok, payload)
@@ -170,7 +193,6 @@ def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise RuntimeError(f"{table} insert failed: {r.status_code} {r.text}")
     rows = r.json()
     return rows[0] if isinstance(rows, list) and rows else (rows or {})
-
 
 def safe_select_with_order(table: str, base_params: Dict[str, str], order_candidates) -> pd.DataFrame:
     last_err = None
@@ -185,7 +207,6 @@ def safe_select_with_order(table: str, base_params: Dict[str, str], order_candid
         raise last_err
     return df_select(table, base_params)
 
-
 # =========================
 # AUTH (CLEAN + RELIABLE)
 # =========================
@@ -199,7 +220,6 @@ def auth_sign_in(email: str, password: str) -> Dict[str, Any]:
         raise RuntimeError(f"Login failed: {r.status_code} {r.text}")
     return r.json()
 
-
 # =========================
 # SESSION
 # =========================
@@ -210,20 +230,16 @@ def ss_init():
     st.session_state.setdefault("facility_name", "")
     st.session_state.setdefault("role", "standard")
 
-
 ss_init()
-
 
 def is_logged_in() -> bool:
     return bool(st.session_state.get("access_token")) and bool(st.session_state.get("user_id"))
-
 
 def logout():
     for k in list(st.session_state.keys()):
         del st.session_state[k]
     ss_init()
     st.rerun()
-
 
 def load_profile() -> Dict[str, Any]:
     tok = st.session_state["access_token"]
@@ -233,7 +249,6 @@ def load_profile() -> Dict[str, Any]:
     rows = r.json()
     return rows[0] if rows else {}
 
-
 def load_facility_name() -> str:
     tok = st.session_state["access_token"]
     r = rest_get("facilities", tok, params={"select": "facility_name", "limit": "1"})
@@ -241,7 +256,6 @@ def load_facility_name() -> str:
         return ""
     rows = r.json()
     return str(rows[0].get("facility_name")) if rows else ""
-
 
 # =========================
 # KPI HELPERS (best-effort)
@@ -266,7 +280,6 @@ def _who_latest_metrics() -> Dict[str, Any]:
         }
     except Exception:
         return {}
-
 
 def render_topbar():
     fac_name = st.session_state.get("facility_name") or "—"
@@ -293,7 +306,6 @@ def render_topbar():
         <span class="ohih-badge">🛡️ Role: {role}</span>
         <span class="ohih-badge">🔒 RLS: ON</span>
         <span class="ohih-badge">📡 Surveillance: ACTIVE</span>
-        <span class="ohih-badge">{AI_ICON} AI: PREDICTION</span>
       </div>
     </div>
     <div class="ohih-kpis">
@@ -308,7 +320,6 @@ def render_topbar():
         unsafe_allow_html=True,
     )
 
-
 # =========================
 # SIDEBAR
 # =========================
@@ -321,7 +332,6 @@ with st.sidebar:
         if st.button("Logout"):
             logout()
     st.divider()
-
 
 # =========================
 # LOGIN
@@ -349,7 +359,6 @@ if not is_logged_in():
         st.rerun()
     st.stop()
 
-
 # =========================
 # CONTEXT
 # =========================
@@ -359,6 +368,8 @@ if not facility_id:
     st.error("staff_profiles.facility_id missing. Fix in Supabase.")
     st.stop()
 
+def is_organizer() -> bool:
+    return st.session_state.get("role") == "organizer"
 
 # =========================
 # COMMON HELPERS
@@ -376,17 +387,14 @@ def patient_picker() -> Optional[str]:
     chosen = st.selectbox("Select patient", labels)
     return chosen.split(" — ")[0].strip()
 
-
 def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
     return df
 
-
 def parse_bool_detected(v: Any) -> bool:
     s = str(v).strip().lower()
     return ("detected" in s) and ("not" not in s)
-
 
 def classify_resistance(rr: bool, inh: bool, fq: bool, bdq: bool, lzd: bool) -> str:
     if not any([rr, inh, fq, bdq, lzd]):
@@ -401,439 +409,177 @@ def classify_resistance(rr: bool, inh: bool, fq: bool, bdq: bool, lzd: bool) -> 
         return "RR-TB"
     return "Drug-sensitive"
 
-
 # =========================
-# AI OUTBREAK PREDICTION (WEIGHTED PRESUMPTIVES + DRIVERS)
+# AI HELPERS (Views already created in Supabase)
 # =========================
-def _sigmoid(x: float) -> float:
-    if x < -30:
-        return 0.0
-    if x > 30:
-        return 1.0
-    import math
-    return 1.0 / (1.0 + math.exp(-x))
-
-
-def _get_bool(df: pd.DataFrame, col: str) -> pd.Series:
-    if col not in df.columns:
-        return pd.Series([False] * len(df))
-    v = df[col]
-    if v.dtype == bool:
-        return v.fillna(False)
-    s = v.astype(str).str.strip().str.lower()
-    return s.isin(["true", "t", "1", "yes", "y"])
-
-
-def _get_num(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
-    if col not in df.columns:
-        return pd.Series([default] * len(df))
-    return pd.to_numeric(df[col], errors="coerce").fillna(default)
-
-
-def _ai_driver_definitions() -> List[Tuple[str, str, int]]:
-    return [
-        ("sx_cough_2w", "Cough ≥ 2 weeks", 3),
-        ("sx_hemoptysis", "Hemoptysis", 3),
-        ("sx_fever", "Fever", 1),
-        ("sx_night_sweats", "Night sweats", 1),
-        ("sx_weight_loss", "Weight loss", 1),
-        ("sx_chest_pain", "Chest pain / breathlessness", 1),
-        ("rf_contact_tb", "Contact with TB case", 2),
-        ("rf_prev_tb", "Previous TB treatment", 1),
-        ("rf_diabetes", "Diabetes (risk)", 1),
-        ("rf_malnutrition", "Malnutrition / underweight (risk)", 1),
-        ("comorbid_hiv", "HIV positive", 2),
-        ("comorbid_diabetes", "Diabetes (comorbidity)", 1),
-        ("comorbid_malnutrition", "Malnutrition (comorbidity)", 1),
-        ("comorbid_ckd", "Chronic kidney disease (CKD)", 1),
-        ("comorbid_copd", "COPD / chronic lung disease", 1),
-        ("comorbid_immunosuppressed", "Immunosuppressed", 1),
-        ("comorbid_cancer", "Cancer", 1),
-        ("comorbid_smoking", "Smoking", 1),
-        ("comorbid_alcohol", "Alcohol use", 1),
-    ]
-
-
-def _presumptive_weight(screening_score: float, screening_band: str, category: str, tb_prob: float) -> float:
-    s = float(screening_score or 0.0)
-    b = (screening_band or "").upper()
-    cat = (category or "").upper()
-    p = float(tb_prob or 0.0)
-
-    w = 0.15 + 0.05 * min(10.0, max(0.0, s))
-    if "HIGH" in b:
-        w += 0.15
-    if cat == "HIGH":
-        w += 0.10
-    if p >= 0.60:
-        w += 0.10
-    return float(max(0.0, min(0.90, w)))
-
-
-def _focus_events_for_drivers(df: pd.DataFrame, days_window: int = 30) -> pd.DataFrame:
-    if df is None or df.empty or "timestamp_dt" not in df.columns:
-        return pd.DataFrame()
-    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days_window)
-    df = df[df["timestamp_dt"] >= cutoff].copy()
+def ai_prediction_df() -> pd.DataFrame:
+    df = df_select("v_ai_prediction_7d", {"select": "*", "limit": "50000"})
     if df.empty:
         return df
-
-    band = df.get("screening_band", pd.Series([""] * len(df))).astype(str).str.upper()
-    cat = df.get("category", pd.Series([""] * len(df))).astype(str).str.upper()
-    genx = df.get("genexpert", pd.Series([""] * len(df))).astype(str).str.lower()
-
-    is_confirmed = (cat == "CONFIRMED TB") | (genx == "positive")
-    is_high_presumptive = band.str.contains("HIGH") | (cat == "HIGH")
-    return df[is_confirmed | is_high_presumptive].copy()
-
-
-def _compute_driver_breakdown(dfe_fac: pd.DataFrame, days_window: int = 30) -> pd.DataFrame:
-    """
-    Returns a dataframe:
-      driver, weight, count, pct, contribution (=count*weight)
-    computed from last N days of confirmed/high-presumptive events.
-    """
-    if dfe_fac is None or dfe_fac.empty:
-        return pd.DataFrame(columns=["driver", "weight", "count", "pct", "contribution"])
-
-    focus = _focus_events_for_drivers(dfe_fac, days_window=days_window)
-    if focus.empty:
-        return pd.DataFrame(columns=["driver", "weight", "count", "pct", "contribution"])
-
-    n = len(focus)
-    rows = []
-    for col, label, wt in _ai_driver_definitions():
-        if col not in focus.columns:
-            continue
-        b = _get_bool(focus, col)
-        cnt = int(b.sum())
-        if cnt <= 0:
-            continue
-        pct = 100.0 * cnt / max(1, n)
-        rows.append(
-            {
-                "driver": label,
-                "weight": int(wt),
-                "count": int(cnt),
-                "pct": float(pct),
-                "contribution": float(cnt * wt),
-            }
-        )
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return pd.DataFrame(columns=["driver", "weight", "count", "pct", "contribution"])
-
-    df = df.sort_values("contribution", ascending=False).reset_index(drop=True)
+    if (not is_organizer()) and ("facility_id" in df.columns):
+        df = df[df["facility_id"].astype(str) == str(facility_id)]
     return df
 
-
-def _compute_top_drivers_text(dfe_fac: pd.DataFrame, days_window: int = 30, top_n: int = 6) -> str:
-    df = _compute_driver_breakdown(dfe_fac, days_window=days_window)
+def ai_drivers_df() -> pd.DataFrame:
+    df = df_select("v_ai_drivers_facility", {"select": "*", "limit": "50000"})
     if df.empty:
-        return "Insufficient driver data"
-    df = df.head(top_n).copy()
-    return ", ".join([f"{r.driver} ({r.pct:.0f}%)" for r in df.itertuples(index=False)])
+        return df
+    if (not is_organizer()) and ("facility_id" in df.columns):
+        df = df[df["facility_id"].astype(str) == str(facility_id)]
+    return df
 
+def ai_map_df() -> pd.DataFrame:
+    df = df_select("v_ai_map_overlay", {"select": "*", "limit": "50000"})
+    if df.empty:
+        return df
+    if (not is_organizer()) and ("facility_id" in df.columns):
+        df = df[df["facility_id"].astype(str) == str(facility_id)]
+    return df
 
-def _ai_predict_hotspots(days_back: int = 120) -> pd.DataFrame:
+def render_ai_block(show_map: bool = True):
     """
-    Predict next 7-day TB surge per facility using TB-SIGNAL time series:
-      TB_SIGNAL = confirmed(1.0) + presumptive_weight(0.0–0.9)
-    Output includes:
-      predicted_next7d_signal, predicted_next7d_confirmed (approx),
-      ai_risk_prob, ai_level, growth, top_drivers
+    Home-page AI block:
+    - AI Prediction banner
+    - Drivers bar chart
+    - Map overlay
     """
     try:
-        dfe = df_select("events", {"select": "*", "limit": "50000"})
-        if dfe.empty:
-            return pd.DataFrame()
+        dfp = ai_prediction_df()
+    except Exception as e:
+        st.error("AI views not reachable yet. Confirm v_ai_prediction_7d exists.")
+        st.exception(e)
+        return
 
-        if "facility_id" not in dfe.columns or "timestamp" not in dfe.columns:
-            return pd.DataFrame()
+    if dfp.empty:
+        st.info("No AI prediction yet. Add more events (MODERATE/HIGH with screening_score, and CONFIRMED TB).")
+        return
 
-        is_org = st.session_state.get("role") == "organizer"
-        if not is_org:
-            dfe = dfe[dfe["facility_id"].astype(str) == str(facility_id)]
+    row = dfp.iloc[0].to_dict()
 
-        dfe["timestamp_dt"] = pd.to_datetime(dfe["timestamp"], errors="coerce", utc=True)
-        dfe = dfe[dfe["timestamp_dt"].notna()]
-        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days_back)
-        dfe = dfe[dfe["timestamp_dt"] >= cutoff]
-        if dfe.empty:
-            return pd.DataFrame()
+    predicted_risk = str(row.get("predicted_risk", "UNKNOWN"))
+    predicted_score = int(row.get("predicted_score", 0) or 0)
+    signal_7d = float(row.get("signal_7d", 0) or 0)
+    confirmed_7d = int(row.get("confirmed_7d", 0) or 0)
+    presumptive_w_7d = float(row.get("presumptive_w_7d", 0) or 0)
+    ratio = row.get("ratio", None)
+    events_28d = int(row.get("events_28d", 0) or 0)
 
-        cat = dfe.get("category", pd.Series([""] * len(dfe))).astype(str)
-        genx = dfe.get("genexpert", pd.Series([""] * len(dfe))).astype(str)
-        band = dfe.get("screening_band", pd.Series([""] * len(dfe))).astype(str)
-        score = _get_num(dfe, "screening_score", 0.0)
-        tbp = _get_num(dfe, "tb_probability", 0.0)
+    # Banner style
+    if predicted_risk in ("HOTSPOT", "RISING"):
+        st.error(f"🧠 AI Prediction (Next 7 days): **{predicted_risk}** | Score: **{predicted_score}/100**")
+    elif predicted_risk in ("WATCH",):
+        st.warning(f"🧠 AI Prediction (Next 7 days): **{predicted_risk}** | Score: **{predicted_score}/100**")
+    elif predicted_risk in ("NOT_ENOUGH_DATA",):
+        st.info("🧠 AI Prediction (Next 7 days): Not enough data yet (the model needs more recent events).")
+    else:
+        st.success(f"🧠 AI Prediction (Next 7 days): **{predicted_risk}** | Score: **{predicted_score}/100**")
 
-        is_conf = (cat.astype(str).str.upper() == "CONFIRMED TB") | (genx.astype(str).str.lower() == "positive")
-        is_pres = (
-            cat.astype(str).str.upper().isin(["HIGH", "MODERATE"])
-            | band.astype(str).str.upper().str.contains("HIGH")
-            | (tbp >= 0.50)
-        )
-        is_pres = is_pres & (~is_conf)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Signal (7d)", f"{signal_7d:.2f}")
+    c2.metric("Confirmed (7d)", f"{confirmed_7d}")
+    c3.metric("Weighted presumptive (7d)", f"{presumptive_w_7d:.2f}")
+    c4.metric("Events (28d)", f"{events_28d}")
+    c5.metric("Ratio vs prev period", "N/A" if ratio is None or str(ratio) == "nan" else f"{float(ratio):.2f}x")
 
-        pres_w = []
-        for s, b, c, p in zip(score.tolist(), band.tolist(), cat.tolist(), tbp.tolist()):
-            pres_w.append(_presumptive_weight(s, b, c, p))
-        pres_w = pd.Series(pres_w)
+    st.caption("AI uses TB signal = confirmed + weighted presumptives (weighted by screening_score).")
 
-        dfe["tb_signal"] = (is_conf.astype(float) * 1.0) + (is_pres.astype(float) * pres_w)
-
-        dfe["week_start"] = dfe["timestamp_dt"].dt.to_period("W-MON").dt.start_time
-
-        wk = dfe.groupby(["facility_id", "week_start"]).agg(tb_signal_week=("tb_signal", "sum")).reset_index()
-
-        conf_only = dfe[is_conf].copy()
-        if not conf_only.empty:
-            conf_only["week_start"] = conf_only["timestamp_dt"].dt.to_period("W-MON").dt.start_time
-            wk_conf = conf_only.groupby(["facility_id", "week_start"]).size().reset_index(name="confirmed_week")
-            wk = wk.merge(wk_conf, on=["facility_id", "week_start"], how="left")
-        wk["confirmed_week"] = pd.to_numeric(wk.get("confirmed_week"), errors="coerce").fillna(0).astype(int)
-
-        try:
-            dff = df_select("facilities", {"select": "facility_id,facility_name,state,lga,latitude,longitude", "limit": "50000"})
-        except Exception:
-            dff = pd.DataFrame()
-
-        out_rows = []
-        for fac, g in wk.groupby("facility_id"):
-            g = g.sort_values("week_start")
-            last_week_start = g["week_start"].max()
-            start = last_week_start - pd.Timedelta(weeks=10)
-            g = g[g["week_start"] >= start].copy()
-
-            idx = pd.date_range(g["week_start"].min(), g["week_start"].max(), freq="W-MON")
-            s_sig = g.set_index("week_start")["tb_signal_week"].reindex(idx, fill_value=0.0)
-            s_conf = g.set_index("week_start")["confirmed_week"].reindex(idx, fill_value=0)
-
-            last_sig = float(s_sig.iloc[-1]) if len(s_sig) >= 1 else 0.0
-            prev_sig = float(s_sig.iloc[-2]) if len(s_sig) >= 2 else 0.0
-            prev2_sig = float(s_sig.iloc[-3]) if len(s_sig) >= 3 else 0.0
-
-            last_c = int(s_conf.iloc[-1]) if len(s_conf) >= 1 else 0
-            prev_c = int(s_conf.iloc[-2]) if len(s_conf) >= 2 else 0
-
-            base = 0.60 * last_sig + 0.30 * prev_sig + 0.10 * prev2_sig
-            growth = (last_sig + 0.50) / (prev_sig + 0.50)
-            growth = max(0.60, min(1.90, float(growth)))
-
-            pred_signal = max(0, int(round(base * growth)))
-            pred_confirmed = max(0, int(round(min(pred_signal, 0.65 * pred_signal + 0.35 * last_c))))
-
-            import math
-            score_ai = (pred_signal - 2.2) + 1.6 * math.log1p(max(0.0, growth - 1.0)) + 0.35 * (last_c - prev_c)
-            prob = float(_sigmoid(score_ai))
-
-            if prob >= 0.85 or pred_signal >= 7:
-                level = "CRITICAL"
-            elif prob >= 0.60 or pred_signal >= 4:
-                level = "HIGH"
-            elif prob >= 0.35 or pred_signal >= 2:
-                level = "WATCH"
-            else:
-                level = "LOW"
-
-            dfe_fac = dfe[dfe["facility_id"].astype(str) == str(fac)].copy()
-            drivers_str = _compute_top_drivers_text(dfe_fac, days_window=30, top_n=6)
-
-            out_rows.append(
-                {
-                    "facility_id": str(fac),
-                    "predicted_next7d_signal": int(pred_signal),
-                    "predicted_next7d_confirmed": int(pred_confirmed),
-                    "ai_risk_prob": float(prob),
-                    "ai_level": level,
-                    "last_week_signal": float(last_sig),
-                    "prev_week_signal": float(prev_sig),
-                    "growth": float(growth),
-                    "top_drivers": drivers_str,
-                }
-            )
-
-        dfp = pd.DataFrame(out_rows)
-        if dfp.empty:
-            return dfp
-
-        if not dff.empty and "facility_id" in dff.columns:
-            dfp = dfp.merge(dff, on="facility_id", how="left")
-
-        dfp["ai_risk_pct"] = (dfp["ai_risk_prob"] * 100.0).round(1)
-
-        dfp = dfp.sort_values(
-            ["ai_risk_prob", "predicted_next7d_signal", "predicted_next7d_confirmed"],
-            ascending=False
-        ).reset_index(drop=True)
-
-        return dfp
+    # Drivers
+    st.markdown("### 🔎 Why is risk high? (Top drivers)")
+    try:
+        dfd = ai_drivers_df()
     except Exception:
-        return pd.DataFrame()
+        dfd = pd.DataFrame()
 
-
-def _render_ai_banner_for_facility(dfp: pd.DataFrame):
-    if dfp is None or dfp.empty:
-        st.info(f"{AI_ICON} AI Prediction: Not enough data yet. Add more events (presumptive/confirmed) first.")
-        return
-
-    is_org = st.session_state.get("role") == "organizer"
-    if is_org:
-        row = dfp.iloc[0].to_dict()
-        fac_label = row.get("facility_name") or row.get("facility_id")
-        msg_title = f"{AI_ICON} AI Prediction: Next 7 days hotspot risk (Top facility: {fac_label})"
+    if dfd.empty:
+        st.info("No driver explanation yet (need symptoms/risk factors recorded in events).")
     else:
-        df_me = dfp[dfp["facility_id"].astype(str) == str(facility_id)]
-        if df_me.empty:
-            st.info(f"{AI_ICON} AI Prediction: No trend yet for this facility.")
-            return
-        row = df_me.iloc[0].to_dict()
-        msg_title = f"{AI_ICON} AI Prediction: Next 7 days hotspot risk for your facility"
+        d = dfd.iloc[0].to_dict()
 
-    level = str(row.get("ai_level", "LOW")).upper()
-    pred_sig = int(row.get("predicted_next7d_signal", 0))
-    pred_conf = int(row.get("predicted_next7d_confirmed", 0))
-    prob_pct = float(row.get("ai_risk_pct", 0.0))
-    last_sig = float(row.get("last_week_signal", 0.0))
-    prev_sig = float(row.get("prev_week_signal", 0.0))
-    growth = float(row.get("growth", 1.0))
-    drivers = str(row.get("top_drivers", "")).strip()
-
-    css = "low"
-    if level == "WATCH":
-        css = "watch"
-    elif level == "HIGH":
-        css = "high"
-    elif level == "CRITICAL":
-        css = "critical"
-
-    if level in ("HIGH", "CRITICAL"):
-        actions = [
-            "Increase rapid cough screening at triage/OPD (all adults)",
-            "Prioritize GeneXpert for HIGH screening band and contacts",
-            "Trigger contact tracing for confirmed cases immediately",
-            "Strengthen IPC: masks + ventilation + separation of coughers",
+        # Choose top driver fields (count columns)
+        driver_cols = [
+            ("cough_2w", "Cough ≥ 2w"),
+            ("hemoptysis", "Hemoptysis"),
+            ("fever", "Fever"),
+            ("night_sweats", "Night sweats"),
+            ("weight_loss", "Weight loss"),
+            ("contact_tb", "Contact TB"),
+            ("hiv", "HIV"),
+            ("previous_tb", "Previous TB"),
+            ("diabetes", "Diabetes"),
         ]
-    elif level == "WATCH":
-        actions = [
-            "Enhance entry screening; review presumptives daily",
-            "Escalate to GeneXpert if symptoms persist/worsen",
-            "Audit lab turnaround time and sputum collection quality",
-        ]
-    else:
-        actions = [
-            "Continue routine surveillance and patient education",
-            "Re-screen persistent cough cases and high-risk contacts",
-        ]
+        drivers = []
+        for col, label in driver_cols:
+            if col in d:
+                try:
+                    drivers.append((label, int(d.get(col) or 0)))
+                except Exception:
+                    drivers.append((label, 0))
 
-    st.markdown(
-        f"""
-<div class="ohih-alert {css}">
-  <h3>{msg_title}</h3>
-  <p><b>AI Level:</b> {level} &nbsp; | &nbsp; <b>Predicted TB signal (next 7d):</b> {pred_sig}
-     &nbsp; | &nbsp; <b>Predicted confirmed (approx):</b> {pred_conf}
-     &nbsp; | &nbsp; <b>Risk Probability:</b> {prob_pct:.1f}%</p>
-  <p><b>Trend:</b> last week signal={last_sig:.1f}, previous={prev_sig:.1f}, growth≈{growth:.2f}x</p>
-  <p><b>Why AI says risk is high (top drivers, last 30 days):</b> {drivers}</p>
-  <p><b>Recommended actions:</b></p>
-  <ul>
-    {''.join([f'<li>{a}</li>' for a in actions])}
-  </ul>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+        df_dr = pd.DataFrame(drivers, columns=["Driver", "Count (last 28d)"])
+        df_dr = df_dr.sort_values("Count (last 28d)", ascending=False)
 
+        top5 = df_dr.head(5)
+        if top5["Count (last 28d)"].sum() == 0:
+            st.info("Drivers are available, but counts are still 0. Record symptoms/risk factors in Diagnosis Events.")
+        else:
+            st.bar_chart(top5.set_index("Driver"))
+            with st.expander("See all drivers"):
+                st.dataframe(df_dr, use_container_width=True, hide_index=True)
 
-def _render_driver_chart(dfe_all_events: pd.DataFrame, facility_id_selected: str, days_window: int = 30):
-    if dfe_all_events is None or dfe_all_events.empty:
-        st.info("No event data to compute drivers.")
+    # Map overlay
+    if not show_map:
         return
 
-    df_fac = dfe_all_events[dfe_all_events["facility_id"].astype(str) == str(facility_id_selected)].copy()
-    if df_fac.empty:
-        st.info("No events for selected facility.")
-        return
-
-    df_fac["timestamp_dt"] = pd.to_datetime(df_fac.get("timestamp"), errors="coerce", utc=True)
-    df_fac = df_fac[df_fac["timestamp_dt"].notna()]
-
-    drv = _compute_driver_breakdown(df_fac, days_window=days_window)
-    if drv.empty:
-        st.info("Not enough driver data yet (need confirmed or high presumptive events).")
-        return
-
-    st.subheader("Top drivers (symptoms/risk factors) contributing to AI risk")
-    st.caption(f"Computed from last {days_window} days of CONFIRMED or HIGH presumptive events. Contribution = count × weight.")
-    top = drv.head(12).copy()
-
-    if px is not None:
-        fig = px.bar(top, x="contribution", y="driver", orientation="h", hover_data=["count", "pct", "weight"])
-        fig.update_layout(height=420, margin={"l": 0, "r": 0, "t": 30, "b": 0})
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        # fallback
-        st.bar_chart(top.set_index("driver")["contribution"])
-
-    st.dataframe(top[["driver", "count", "pct", "weight", "contribution"]], use_container_width=True, hide_index=True)
-
-
-def _render_ai_map_overlay(dfp: pd.DataFrame):
-    section("AI Map Overlay")
-    st.caption("Predicted hotspot risk overlay (requires facilities.latitude and facilities.longitude).")
-
+    st.markdown("### 🗺️ AI Map Overlay")
     if px is None:
-        st.error("Plotly not installed. Add 'plotly' to requirements.txt then redeploy.")
+        st.info("Plotly is not available, so map overlay will show as a table. Add plotly to requirements.txt to enable maps.")
+        try:
+            dfm = ai_map_df()
+            st.dataframe(dfm, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.exception(e)
         return
 
-    if dfp is None or dfp.empty:
-        st.info("No AI prediction rows yet.")
+    try:
+        dfm = ai_map_df()
+    except Exception as e:
+        st.error("Could not load v_ai_map_overlay.")
+        st.exception(e)
         return
 
-    # ensure coords
-    if "latitude" not in dfp.columns or "longitude" not in dfp.columns:
-        st.warning("Facilities coordinates not found in merged AI table.")
+    if dfm.empty:
+        st.info("AI map overlay has no rows yet.")
         return
 
-    dfm = dfp.copy()
+    # require coords
+    if ("latitude" not in dfm.columns) or ("longitude" not in dfm.columns):
+        st.warning("Facilities coordinates not found in AI map overlay table.")
+        st.dataframe(dfm, use_container_width=True, hide_index=True)
+        return
+
     dfm["latitude"] = pd.to_numeric(dfm["latitude"], errors="coerce")
     dfm["longitude"] = pd.to_numeric(dfm["longitude"], errors="coerce")
     dfm = dfm.dropna(subset=["latitude", "longitude"])
 
     if dfm.empty:
-        st.warning("No facilities have coordinates yet. Add latitude/longitude in facilities table.")
-        st.markdown("Quick fix SQL example (edit values):")
-        st.code(
-            f"""
-update public.facilities
-set state='Rivers', lga='Port Harcourt', latitude=4.8156, longitude=7.0498
-where facility_id='{facility_id}';
-"""
-        )
+        st.warning("No facilities with coordinates. Add facilities.latitude and facilities.longitude.")
         return
 
-    # Map overlay: size=predicted signal, color=risk %
-    hover_cols = {}
-    for c in ["facility_name", "state", "lga", "ai_level", "ai_risk_pct", "predicted_next7d_signal", "predicted_next7d_confirmed", "top_drivers"]:
-        if c in dfm.columns:
-            hover_cols[c] = True
+    # Use predicted_score as intensity
+    dfm["predicted_score"] = pd.to_numeric(dfm.get("predicted_score"), errors="coerce").fillna(0)
 
     fig = px.scatter_mapbox(
         dfm,
         lat="latitude",
         lon="longitude",
-        size="predicted_next7d_signal" if "predicted_next7d_signal" in dfm.columns else None,
-        color="ai_risk_pct" if "ai_risk_pct" in dfm.columns else None,
-        hover_name="facility_name" if "facility_name" in dfm.columns else "facility_id",
-        hover_data=hover_cols,
+        size="predicted_score",
+        hover_name="facility_name" if "facility_name" in dfm.columns else None,
+        hover_data={c: True for c in ["state", "lga", "predicted_risk", "predicted_score", "signal_7d", "confirmed_7d"] if c in dfm.columns},
         zoom=4.2,
-        height=560,
+        height=520,
     )
     fig.update_layout(mapbox_style="open-street-map", margin={"l": 0, "r": 0, "t": 0, "b": 0})
     st.plotly_chart(fig, use_container_width=True)
-
 
 # =========================
 # PAGES
@@ -841,29 +587,19 @@ where facility_id='{facility_id}';
 def page_home():
     render_topbar()
     section("Home")
-    st.success("✅ Authenticated. RLS isolates data per facility. WHO + GIS + Alerts + AI Prediction enabled.")
+    st.success("✅ Authenticated. RLS isolates data per facility. WHO Dashboard + GIS + Alerts enabled.")
     st.write("Facility ID:", facility_id)
     st.write("Role:", st.session_state.get("role"))
 
+    st.markdown("---")
     section("AI Outbreak Prediction")
-    dfp = _ai_predict_hotspots(days_back=120)
-    _render_ai_banner_for_facility(dfp)
+    render_ai_block(show_map=True)
 
-    if dfp is not None and not dfp.empty:
-        show_cols = [c for c in [
-            "facility_name", "state", "lga",
-            "predicted_next7d_signal", "predicted_next7d_confirmed",
-            "ai_risk_pct", "ai_level",
-            "last_week_signal", "prev_week_signal", "growth",
-            "top_drivers"
-        ] if c in dfp.columns]
-
-        st.caption("Top predicted hotspot facilities (AI, next 7 days). TB signal = confirmed + weighted presumptives.")
-        st.dataframe(dfp[show_cols].head(10), use_container_width=True, hide_index=True)
-
-    # Map overlay on Home (nice!)
-    _render_ai_map_overlay(dfp)
-
+def page_ai_prediction():
+    render_topbar()
+    section("AI Prediction (Next 7 days)")
+    st.caption("AI uses TB signal = confirmed + weighted presumptives (weighted by screening_score). It also explains WHY risk is high.")
+    render_ai_block(show_map=True)
 
 def page_patients():
     render_topbar()
@@ -892,13 +628,8 @@ def page_patients():
             st.success(f"Saved ✅ Patient: {out.get('patient_id')}")
             st.rerun()
 
-    dfp = safe_select_with_order(
-        "patients",
-        {"select": "*", "limit": "5000"},
-        ["created_at.desc", "updated_at.desc", "patient_id.desc"],
-    )
+    dfp = safe_select_with_order("patients", {"select": "*", "limit": "5000"}, ["created_at.desc", "updated_at.desc", "patient_id.desc"])
     st.dataframe(dfp, use_container_width=True, hide_index=True)
-
 
 def page_diagnosis_events():
     render_topbar()
@@ -914,14 +645,17 @@ def page_diagnosis_events():
     cxr = st.selectbox("CXR", ["Not done", "Suggestive", "Not suggestive"])
     notes = st.text_area("Notes")
 
+    # Screening symptoms
     st.markdown("### TB Screening Symptoms")
     col1, col2 = st.columns(2)
+
     with col1:
         sx_cough_2w = st.checkbox("Cough ≥ 2 weeks")
         sx_fever = st.checkbox("Fever")
         sx_night_sweats = st.checkbox("Night sweats")
         sx_weight_loss = st.checkbox("Weight loss")
         sx_hemoptysis = st.checkbox("Hemoptysis")
+
     with col2:
         sx_chest_pain = st.checkbox("Chest pain / breathlessness")
         rf_contact_tb = st.checkbox("Contact with TB case")
@@ -929,13 +663,16 @@ def page_diagnosis_events():
         rf_diabetes = st.checkbox("Diabetes (risk)")
         rf_malnutrition = st.checkbox("Malnutrition / underweight (risk)")
 
+    # Comorbidities / risk factors
     st.markdown("### Comorbidities / Risk Factors")
     col3, col4 = st.columns(2)
+
     with col3:
         comorbid_hiv = st.checkbox("HIV positive")
         comorbid_diabetes = st.checkbox("Diabetes (comorbidity)")
         comorbid_malnutrition = st.checkbox("Malnutrition")
         comorbid_smoking = st.checkbox("Smoking")
+
     with col4:
         comorbid_alcohol = st.checkbox("Alcohol use")
         comorbid_ckd = st.checkbox("Chronic kidney disease (CKD)")
@@ -943,6 +680,7 @@ def page_diagnosis_events():
         comorbid_cancer = st.checkbox("Cancer")
         comorbid_immunosuppressed = st.checkbox("Immunosuppressed (steroids/transplant)")
 
+    # Decision support score
     score = 0
     score += 3 if sx_cough_2w else 0
     score += 1 if sx_fever else 0
@@ -950,12 +688,10 @@ def page_diagnosis_events():
     score += 1 if sx_weight_loss else 0
     score += 3 if sx_hemoptysis else 0
     score += 1 if sx_chest_pain else 0
-
     score += 2 if rf_contact_tb else 0
     score += 1 if rf_prev_tb else 0
     score += 1 if rf_diabetes else 0
     score += 1 if rf_malnutrition else 0
-
     score += 2 if comorbid_hiv else 0
     score += 1 if comorbid_diabetes else 0
     score += 1 if comorbid_malnutrition else 0
@@ -1013,16 +749,22 @@ def page_diagnosis_events():
             "cxr": cxr,
             "notes": notes.strip(),
             "timestamp": now_iso(),
+
+            # Symptoms
             "sx_cough_2w": sx_cough_2w,
             "sx_fever": sx_fever,
             "sx_night_sweats": sx_night_sweats,
             "sx_weight_loss": sx_weight_loss,
             "sx_hemoptysis": sx_hemoptysis,
             "sx_chest_pain": sx_chest_pain,
+
+            # Risks
             "rf_contact_tb": rf_contact_tb,
             "rf_prev_tb": rf_prev_tb,
             "rf_diabetes": rf_diabetes,
             "rf_malnutrition": rf_malnutrition,
+
+            # Comorbidities
             "comorbid_hiv": comorbid_hiv,
             "comorbid_diabetes": comorbid_diabetes,
             "comorbid_malnutrition": comorbid_malnutrition,
@@ -1032,22 +774,18 @@ def page_diagnosis_events():
             "comorbid_copd": comorbid_copd,
             "comorbid_cancer": comorbid_cancer,
             "comorbid_immunosuppressed": comorbid_immunosuppressed,
+
+            # Decision outputs
             "screening_score": int(score),
             "screening_band": screening_band,
             "recommendation": recommendation,
         }
-
         insert_row("events", payload)
         st.success("Saved ✅")
         st.rerun()
 
-    dfe = safe_select_with_order(
-        "events",
-        {"select": "*", "limit": "5000"},
-        ["timestamp.desc", "created_at.desc", "event_id.desc"],
-    )
+    dfe = safe_select_with_order("events", {"select": "*", "limit": "5000"}, ["timestamp.desc", "created_at.desc", "event_id.desc"])
     st.dataframe(dfe, use_container_width=True, hide_index=True)
-
 
 def page_dots():
     render_topbar()
@@ -1076,6 +814,7 @@ def page_dots():
         else:
             if "duplicate key" in r.text.lower() or r.status_code == 409:
                 match = {"facility_id": f"eq.{facility_id}", "patient_id": f"eq.{pid}", "date": f"eq.{date.isoformat()}"}
+                # Some schemas do not have updated_at; so patch without it
                 rp = rest_patch(
                     "dots_daily",
                     st.session_state["access_token"],
@@ -1092,7 +831,6 @@ def page_dots():
 
     dfd = safe_select_with_order("dots_daily", {"select": "*", "limit": "5000"}, ["date.desc"])
     st.dataframe(dfd, use_container_width=True, hide_index=True)
-
 
 def page_adherence():
     render_topbar()
@@ -1136,7 +874,6 @@ def page_adherence():
     dfa = safe_select_with_order("adherence", {"select": "*", "limit": "5000"}, ["timestamp.desc", "created_at.desc", "created_by.desc"])
     st.dataframe(dfa, use_container_width=True, hide_index=True)
 
-
 def page_treatment():
     render_topbar()
     section("Treatment")
@@ -1167,7 +904,6 @@ def page_treatment():
 
     dft = safe_select_with_order("tb_treatment", {"select": "*", "limit": "5000"}, ["updated_at.desc", "created_at.desc"])
     st.dataframe(dft, use_container_width=True, hide_index=True)
-
 
 def page_contact_tracing():
     render_topbar()
@@ -1235,7 +971,6 @@ def page_contact_tracing():
     st.subheader("Contacts")
     st.dataframe(dfc, use_container_width=True, hide_index=True)
 
-
 def page_drug_resistance():
     render_topbar()
     section("Drug Resistance (RR/MDR/XDR)")
@@ -1282,7 +1017,6 @@ def page_drug_resistance():
         ["created_at.desc", "updated_at.desc"],
     )
     st.dataframe(dfr, use_container_width=True, hide_index=True)
-
 
 def page_genexpert_import():
     render_topbar()
@@ -1387,7 +1121,6 @@ def page_genexpert_import():
         st.success(f"Import complete ✅ Success={ok} Failed={fail}")
         st.rerun()
 
-
 def page_who_dashboard():
     render_topbar()
     section("WHO Dashboard")
@@ -1402,8 +1135,7 @@ def page_who_dashboard():
         st.error(f"v_who_indicators_monthly returned no facility_id. Columns seen: {list(dfw.columns)}")
         st.stop()
 
-    is_org = st.session_state.get("role") == "organizer"
-    if not is_org:
+    if not is_organizer():
         dfw = dfw[dfw["facility_id"].astype(str) == str(facility_id)]
 
     dfw["month"] = pd.to_datetime(dfw["month"], errors="coerce")
@@ -1421,7 +1153,6 @@ def page_who_dashboard():
     trend = dfw.groupby("month")[trend_cols].sum().reset_index()
     st.line_chart(trend.set_index("month"))
 
-
 def page_gis_heatmap():
     render_topbar()
     section("GIS Heatmap (Nigeria)")
@@ -1436,8 +1167,7 @@ def page_gis_heatmap():
         st.info("No facilities/events yet.")
         return
 
-    is_org = st.session_state.get("role") == "organizer"
-    if (not is_org) and ("facility_id" in dfm.columns):
+    if (not is_organizer()) and ("facility_id" in dfm.columns):
         dfm = dfm[dfm["facility_id"].astype(str) == str(facility_id)]
 
     dfm["latitude"] = pd.to_numeric(dfm.get("latitude"), errors="coerce")
@@ -1469,14 +1199,6 @@ def page_gis_heatmap():
 
     if dff.empty:
         st.warning("No facilities with coordinates match your filters.")
-        st.markdown("Quick fix SQL (paste in Supabase SQL Editor):")
-        st.code(
-            f"""
-update public.facilities
-set state='Rivers', lga='Port Harcourt', latitude=4.8156, longitude=7.0498
-where facility_id='{facility_id}';
-"""
-        )
         return
 
     fig = px.density_mapbox(
@@ -1493,7 +1215,6 @@ where facility_id='{facility_id}';
     fig.update_layout(mapbox_style="open-street-map", margin={"l": 0, "r": 0, "t": 0, "b": 0})
     st.plotly_chart(fig, use_container_width=True)
 
-
 def page_outbreak_alerts():
     render_topbar()
     section("Outbreak Alerts")
@@ -1502,7 +1223,7 @@ def page_outbreak_alerts():
     try:
         dfh = df_select("v_hotspots", {"select": "*", "limit": "50000"})
     except Exception as e:
-        st.error("Could not load v_hotspots. Ensure you ran the Outbreak Alerts SQL block.")
+        st.error("Could not load v_hotspots.")
         st.exception(e)
         return
 
@@ -1510,63 +1231,12 @@ def page_outbreak_alerts():
         st.info("No data yet.")
         return
 
-    if st.session_state.get("role") != "organizer" and "facility_id" in dfh.columns:
+    if not is_organizer() and "facility_id" in dfh.columns:
         dfh = dfh[dfh["facility_id"].astype(str) == str(facility_id)]
 
     show_cols = [c for c in ["facility_name", "state", "lga", "confirmed_7d", "confirmed_prev_28d", "ratio", "hotspot_level"] if c in dfh.columns]
     st.subheader("Hotspot ranking (last 7 days)")
     st.dataframe(dfh[show_cols].sort_values("confirmed_7d", ascending=False), use_container_width=True, hide_index=True)
-
-
-def page_ai_prediction():
-    render_topbar()
-    section("AI Prediction (Next 7 days)")
-    st.caption("AI uses TB signal = confirmed + weighted presumptives (weighted by screening score). It also explains WHY risk is high.")
-
-    dfp = _ai_predict_hotspots(days_back=120)
-    _render_ai_banner_for_facility(dfp)
-
-    if dfp is None or dfp.empty:
-        st.warning("No AI prediction yet. Add more events (HIGH/MODERATE with screening_score, and confirmed).")
-        return
-
-    show_cols = [c for c in [
-        "facility_name", "state", "lga",
-        "predicted_next7d_signal", "predicted_next7d_confirmed",
-        "ai_risk_pct", "ai_level", "growth",
-        "top_drivers", "facility_id"
-    ] if c in dfp.columns]
-
-    st.subheader("Predicted hotspot ranking")
-    st.dataframe(dfp[show_cols].head(50), use_container_width=True, hide_index=True)
-
-    # ---- Driver chart for a selected facility ----
-    section("Drivers Chart (Why AI is High)")
-    if "facility_name" in dfp.columns:
-        labels = (dfp["facility_id"].astype(str) + " — " + dfp["facility_name"].fillna("").astype(str)).tolist()
-    else:
-        labels = dfp["facility_id"].astype(str).tolist()
-
-    default_label = None
-    if st.session_state.get("role") != "organizer":
-        # auto-select own facility
-        for lab in labels:
-            if lab.startswith(str(facility_id)):
-                default_label = lab
-                break
-
-    chosen = st.selectbox("Select facility to view driver chart", labels, index=(labels.index(default_label) if default_label in labels else 0))
-    fac_sel = chosen.split(" — ")[0].strip()
-
-    # load events once for chart
-    dfe_all = df_select("events", {"select": "*", "limit": "50000"})
-    if st.session_state.get("role") != "organizer":
-        dfe_all = dfe_all[dfe_all["facility_id"].astype(str) == str(facility_id)]
-    _render_driver_chart(dfe_all, fac_sel, days_window=30)
-
-    # ---- Map overlay in AI page ----
-    _render_ai_map_overlay(dfp)
-
 
 def page_exports():
     render_topbar()
@@ -1580,11 +1250,10 @@ def page_exports():
         except Exception:
             cols[i % 4].caption(f"{t} not ready")
 
-
 def page_national_view():
     render_topbar()
     section("National View (Organizer)")
-    if st.session_state.get("role") != "organizer":
+    if not is_organizer():
         st.warning("Organizer only.")
         return
 
@@ -1595,12 +1264,12 @@ def page_national_view():
     st.subheader("Events")
     st.dataframe(df_evt, use_container_width=True, hide_index=True)
 
-
 # =========================
 # MENU + ROUTER
 # =========================
 menu = [
     f"{TB_ICON} Home",
+    f"{TB_ICON} AI Prediction",
     f"{TB_ICON} Patients",
     f"{TB_ICON} Diagnosis Events",
     f"{TB_ICON} DOTS",
@@ -1612,16 +1281,17 @@ menu = [
     f"{TB_ICON} WHO Dashboard",
     f"{TB_ICON} GIS Heatmap",
     f"{TB_ICON} Outbreak Alerts",
-    f"{AI_ICON} AI Prediction",
     f"{TB_ICON} Exports",
 ]
-if st.session_state.get("role") == "organizer":
+if is_organizer():
     menu.append(f"{TB_ICON} National View")
 
 page = st.sidebar.radio("Menu", menu)
 
 if page.endswith("Home"):
     page_home()
+elif page.endswith("AI Prediction"):
+    page_ai_prediction()
 elif page.endswith("Patients"):
     page_patients()
 elif page.endswith("Diagnosis Events"):
@@ -1644,8 +1314,6 @@ elif page.endswith("GIS Heatmap"):
     page_gis_heatmap()
 elif page.endswith("Outbreak Alerts"):
     page_outbreak_alerts()
-elif page.endswith("AI Prediction"):
-    page_ai_prediction()
 elif page.endswith("Exports"):
     page_exports()
 elif page.endswith("National View"):
