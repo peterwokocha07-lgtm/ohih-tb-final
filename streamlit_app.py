@@ -1,7 +1,7 @@
 import os
 import json
 import datetime as dt
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 
 import pandas as pd
 import requests
@@ -16,6 +16,7 @@ except Exception:
 # BRANDING (OHIH-TB) + NATIONAL DASHBOARD LOOK
 # ============================================================
 TB_ICON = "🫁"
+AI_ICON = "🧠"
 APP_SHORT = "OHIH-TB"
 APP_FULL = "One Health Intelligence Hub for TB (OHIH-TB)"
 
@@ -104,32 +105,21 @@ st.markdown(
   font-weight: 800;
 }
 
-/* --- Alerts --- */
+/* --- Alert cards --- */
 .ohih-alert{
   border-radius: 16px;
   padding: 12px 14px;
   border: 1px solid rgba(2,6,23,.12);
-  box-shadow: 0 10px 22px rgba(2,6,23,.08);
-  margin: 8px 0 14px 0;
+  box-shadow: 0 10px 24px rgba(2,6,23,.08);
+  margin: 10px 0 12px 0;
 }
-.ohih-alert.high{
-  background: rgba(245,158,11,.16);
-}
-.ohih-alert.critical{
-  background: rgba(239,68,68,.16);
-}
-.ohih-alert.ok{
-  background: rgba(34,197,94,.12);
-}
-.ohih-alert h3{
-  margin: 0 0 6px 0;
-  font-size: 18px;
-  font-weight: 900;
-}
-.ohih-alert p{
-  margin: 0;
-  opacity: .92;
-}
+.ohih-alert h3{ margin:0; font-size:16px; font-weight:900; }
+.ohih-alert p{ margin:6px 0 0 0; font-size:13px; opacity:.95; }
+.ohih-alert ul{ margin:8px 0 0 16px; font-size:13px; }
+.ohih-alert.low{ background: rgba(34,197,94,.10); }
+.ohih-alert.watch{ background: rgba(245,158,11,.12); }
+.ohih-alert.high{ background: rgba(239,68,68,.12); }
+.ohih-alert.critical{ background: rgba(220,38,38,.16); border-color: rgba(220,38,38,.35); }
 
 /* --- Subtle divider --- */
 hr{
@@ -168,11 +158,6 @@ def safe_secret(name: str, default: str = "") -> str:
 
 SUPABASE_URL = safe_secret("SUPABASE_URL", "").strip()
 SUPABASE_ANON_KEY = safe_secret("SUPABASE_ANON_KEY", "").strip()
-
-# Optional notification secrets
-SENDGRID_API_KEY = safe_secret("SENDGRID_API_KEY", "").strip()
-ALERT_EMAIL_TO = safe_secret("ALERT_EMAIL_TO", "").strip()
-ALERT_EMAIL_FROM = safe_secret("ALERT_EMAIL_FROM", "").strip()
 
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.error("Missing SUPABASE_URL or SUPABASE_ANON_KEY in Streamlit Secrets.")
@@ -275,7 +260,6 @@ def ss_init():
     st.session_state.setdefault("profile", {})
     st.session_state.setdefault("facility_name", "")
     st.session_state.setdefault("role", "standard")
-    st.session_state.setdefault("last_alert_key_sent", "")  # in-session anti-dup
 
 
 ss_init()
@@ -360,6 +344,7 @@ def render_topbar():
         <span class="ohih-badge">🛡️ Role: {role}</span>
         <span class="ohih-badge">🔒 RLS: ON</span>
         <span class="ohih-badge">📡 Surveillance: ACTIVE</span>
+        <span class="ohih-badge">{AI_ICON} AI: PREDICTION</span>
       </div>
     </div>
     <div class="ohih-kpis">
@@ -373,198 +358,6 @@ def render_topbar():
 """,
         unsafe_allow_html=True,
     )
-
-
-# =========================
-# OUTBREAK: HOME BANNER + NOTIFY
-# =========================
-def _get_hotspot_row_for_facility(facility_id: str) -> Optional[Dict[str, Any]]:
-    """
-    Reads v_hotspots and returns this facility's row if present.
-    Expected cols: facility_id, facility_name, state, lga, confirmed_7d, confirmed_prev_28d, ratio, hotspot_level
-    """
-    try:
-        dfh = df_select("v_hotspots", {"select": "*", "limit": "50000"})
-        if dfh.empty or "facility_id" not in dfh.columns:
-            return None
-        dff = dfh[dfh["facility_id"].astype(str) == str(facility_id)].copy()
-        if dff.empty:
-            return None
-        row = dff.iloc[0].to_dict()
-        return row
-    except Exception:
-        return None
-
-
-def _format_hotspot_alert(row: Dict[str, Any]) -> Tuple[str, str, str]:
-    """
-    Returns: (css_class, title, body)
-    """
-    level = str(row.get("hotspot_level", "") or "").upper()
-    confirmed_7d = row.get("confirmed_7d", 0)
-    prev_28d = row.get("confirmed_prev_28d", 0)
-    ratio = row.get("ratio", None)
-    fac = str(row.get("facility_name", "") or st.session_state.get("facility_name") or "Facility")
-    state = str(row.get("state", "") or "")
-    lga = str(row.get("lga", "") or "")
-
-    ratio_str = "N/A" if ratio is None else f"{float(ratio):.2f}x"
-    loc = " • ".join([x for x in [lga, state] if x.strip()])
-
-    if level in ("CRITICAL", "SEVERE"):
-        css = "critical"
-        title = f"🚨 OUTBREAK ALERT: {level}"
-        body = (
-            f"**{fac}** ({loc}) is flagged as a hotspot.\n\n"
-            f"- Confirmed TB (last 7d): **{confirmed_7d}**\n"
-            f"- Previous 28d baseline: **{prev_28d}**\n"
-            f"- Growth ratio: **{ratio_str}**\n\n"
-            f"**Action:** Activate IPC measures, review triage, ensure GeneXpert availability, and notify TB focal person."
-        )
-        return css, title, body
-
-    if level in ("HIGH", "HOTSPOT"):
-        css = "high"
-        title = f"⚠️ HOTSPOT WARNING: {level}"
-        body = (
-            f"**{fac}** ({loc}) shows unusual TB activity.\n\n"
-            f"- Confirmed TB (last 7d): **{confirmed_7d}**\n"
-            f"- Previous 28d baseline: **{prev_28d}**\n"
-            f"- Growth ratio: **{ratio_str}**\n\n"
-            f"**Action:** Intensify screening, prioritize GeneXpert for presumptives, and increase contact tracing."
-        )
-        return css, title, body
-
-    css = "ok"
-    title = "✅ Surveillance OK"
-    body = "No hotspot signal detected for this facility in the last 7 days."
-    return css, title, body
-
-
-def _send_email_sendgrid(subject: str, content: str) -> Tuple[bool, str]:
-    """
-    Uses SendGrid Web API via HTTPS (no extra libs needed).
-    Requires:
-      SENDGRID_API_KEY, ALERT_EMAIL_TO, ALERT_EMAIL_FROM
-    """
-    if not SENDGRID_API_KEY or not ALERT_EMAIL_TO or not ALERT_EMAIL_FROM:
-        return False, "Email not configured (missing SENDGRID_API_KEY / ALERT_EMAIL_TO / ALERT_EMAIL_FROM)."
-
-    url = "https://api.sendgrid.com/v3/mail/send"
-    headers = {
-        "Authorization": f"Bearer {SENDGRID_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "personalizations": [{"to": [{"email": ALERT_EMAIL_TO}]}],
-        "from": {"email": ALERT_EMAIL_FROM},
-        "subject": subject,
-        "content": [{"type": "text/plain", "value": content}],
-    }
-
-    try:
-        r = requests.post(url, headers=headers, json=payload, timeout=30)
-        if r.status_code in (200, 202):
-            return True, "Sent ✅"
-        return False, f"SendGrid failed: {r.status_code} {r.text}"
-    except Exception as e:
-        return False, f"SendGrid error: {e}"
-
-
-def _notify_once_per_alert(facility_id: str, alert_key: str, subject: str, body: str) -> Tuple[bool, str]:
-    """
-    Logs notifications in tb_alert_notifications to avoid duplicates.
-    If the insert violates unique constraint -> already sent.
-    """
-    # In-session quick block too (prevents rerun spam)
-    if st.session_state.get("last_alert_key_sent") == alert_key:
-        return False, "Already notified in this session."
-
-    # First try to log in DB (best for long-term)
-    try:
-        insert_row(
-            "tb_alert_notifications",
-            {
-                "facility_id": str(facility_id),
-                "alert_key": str(alert_key),
-                "channel": "email",
-                "sent_to": ALERT_EMAIL_TO,
-                "sent_at": now_iso(),
-            },
-        )
-    except Exception as e:
-        # If unique constraint blocks it, it means already sent before
-        msg = str(e)
-        if "duplicate key" in msg.lower() or "unique" in msg.lower():
-            return False, "Already notified earlier."
-        # If table not created, still allow send (but warn)
-        warn = f"Notification log not available ({msg}). Sending anyway."
-
-        ok, info = _send_email_sendgrid(subject, body)
-        if ok:
-            st.session_state["last_alert_key_sent"] = alert_key
-            return True, f"{info} (no-log)"
-        return False, f"{warn} | {info}"
-
-    # If DB insert worked, send email
-    ok, info = _send_email_sendgrid(subject, body)
-    if ok:
-        st.session_state["last_alert_key_sent"] = alert_key
-        return True, info
-    return False, info
-
-
-def render_home_outbreak_banner():
-    """
-    Shows banner + auto-notify (if configured) when hotspot level is HIGH/CRITICAL.
-    """
-    row = _get_hotspot_row_for_facility(str(facility_id))
-    if not row:
-        st.markdown(
-            """
-<div class="ohih-alert ok">
-  <h3>✅ Surveillance OK</h3>
-  <p>No hotspot signal detected (or v_hotspots has no row yet for this facility).</p>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-        return
-
-    css, title, body = _format_hotspot_alert(row)
-    st.markdown(
-        f"""
-<div class="ohih-alert {css}">
-  <h3>{title}</h3>
-  <p style="white-space:pre-line;">{body}</p>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    # Build a stable "alert_key"
-    # If your v_hotspots has a date column, you can include it; for now we use level+counts
-    level = str(row.get("hotspot_level", "") or "").upper()
-    alert_key = f"{facility_id}|{level}|{row.get('confirmed_7d',0)}|{row.get('confirmed_prev_28d',0)}|{row.get('ratio','')}"
-    subject = f"OHIH-TB ALERT [{level}] - {st.session_state.get('facility_name','Facility')}"
-    plain = body.replace("**", "")
-
-    # Auto-send only when HIGH/CRITICAL
-    should_send = level in ("HIGH", "HOTSPOT", "CRITICAL", "SEVERE")
-
-    # Show notify controls
-    with st.expander("🔔 Notifications (Email)", expanded=False):
-        st.write("To:", ALERT_EMAIL_TO or "Not set")
-        st.write("From:", ALERT_EMAIL_FROM or "Not set")
-        st.caption("Uses SendGrid API. Configure in Streamlit Secrets.")
-        if st.button("Send alert email now"):
-            ok, info = _notify_once_per_alert(str(facility_id), alert_key, subject, plain)
-            (st.success if ok else st.warning)(info)
-
-    # Auto notify silently (best-effort) once per alert
-    if should_send and SENDGRID_API_KEY and ALERT_EMAIL_TO and ALERT_EMAIL_FROM:
-        # don't interrupt the UI; best-effort
-        _notify_once_per_alert(str(facility_id), alert_key, subject, plain)
 
 
 # =========================
@@ -661,19 +454,230 @@ def classify_resistance(rr: bool, inh: bool, fq: bool, bdq: bool, lzd: bool) -> 
 
 
 # =========================
+# AI OUTBREAK PREDICTION (NO NEW LIBS)
+# =========================
+def _sigmoid(x: float) -> float:
+    # stable-ish sigmoid
+    if x < -30:
+        return 0.0
+    if x > 30:
+        return 1.0
+    import math
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+def _ai_predict_hotspots(days_back: int = 120) -> pd.DataFrame:
+    """
+    Predict next 7-day confirmed TB per facility using simple trend model:
+    - Weekly confirmed counts from events (CONFIRMED TB or GeneXpert Positive)
+    - Weighted moving average + growth factor
+    - Probability via sigmoid
+    Returns columns:
+      facility_id, predicted_next7d, ai_risk_prob, ai_level, last_week, prev_week, growth
+    """
+    try:
+        # Pull lots (but reasonable) and filter client-side.
+        dfe = df_select("events", {"select": "facility_id,timestamp,category,genexpert", "limit": "50000"})
+        if dfe.empty:
+            return pd.DataFrame()
+
+        # basic validation
+        for c in ["facility_id", "timestamp"]:
+            if c not in dfe.columns:
+                return pd.DataFrame()
+
+        # Role filter: if not organizer, only current facility
+        is_org = st.session_state.get("role") == "organizer"
+        if not is_org:
+            dfe = dfe[dfe["facility_id"].astype(str) == str(facility_id)]
+
+        # time filter
+        dfe["timestamp_dt"] = pd.to_datetime(dfe["timestamp"], errors="coerce", utc=True)
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days_back)
+        dfe = dfe[dfe["timestamp_dt"].notna()]
+        dfe = dfe[dfe["timestamp_dt"] >= cutoff]
+        if dfe.empty:
+            return pd.DataFrame()
+
+        # confirmed flag
+        dfe["category"] = dfe.get("category", "").astype(str)
+        dfe["genexpert"] = dfe.get("genexpert", "").astype(str)
+        dfe["is_confirmed"] = (dfe["category"].str.upper() == "CONFIRMED TB") | (dfe["genexpert"].str.lower() == "positive")
+
+        dfe = dfe[dfe["is_confirmed"]]
+        if dfe.empty:
+            return pd.DataFrame()
+
+        # week start (Monday)
+        dfe["week_start"] = dfe["timestamp_dt"].dt.to_period("W-MON").dt.start_time
+        wk = dfe.groupby(["facility_id", "week_start"]).size().reset_index(name="confirmed_week")
+
+        # Build predictions per facility
+        out_rows = []
+        for fac, g in wk.groupby("facility_id"):
+            g = g.sort_values("week_start")
+            # ensure continuous weekly index
+            last_week_start = g["week_start"].max()
+            # take last 10 weeks window
+            start = last_week_start - pd.Timedelta(weeks=10)
+            g = g[g["week_start"] >= start].copy()
+
+            # create complete weekly series
+            idx = pd.date_range(g["week_start"].min(), g["week_start"].max(), freq="W-MON", tz=None)
+            s = g.set_index("week_start")["confirmed_week"].reindex(idx, fill_value=0)
+
+            # last 3 weeks values
+            last = int(s.iloc[-1]) if len(s) >= 1 else 0
+            prev = int(s.iloc[-2]) if len(s) >= 2 else 0
+            prev2 = int(s.iloc[-3]) if len(s) >= 3 else 0
+
+            # weighted base + growth factor
+            base = 0.60 * last + 0.30 * prev + 0.10 * prev2
+            growth = (last + 1) / (prev + 1)
+            growth = max(0.60, min(1.80, float(growth)))
+
+            pred = int(round(base * growth))
+            pred = max(0, pred)
+
+            # Probability: more weight on predicted counts and growth
+            # - increase score when pred >=3 and growth >1
+            import math
+            score = (pred - 2.0) + 1.4 * math.log1p(max(0.0, growth - 1.0)) + 0.25 * (last - prev)
+            prob = float(_sigmoid(score))
+
+            if prob >= 0.85 or pred >= 5:
+                level = "CRITICAL"
+            elif prob >= 0.60 or pred >= 3:
+                level = "HIGH"
+            elif prob >= 0.35 or pred >= 2:
+                level = "WATCH"
+            else:
+                level = "LOW"
+
+            out_rows.append(
+                {
+                    "facility_id": str(fac),
+                    "predicted_next7d": int(pred),
+                    "ai_risk_prob": float(prob),
+                    "ai_level": level,
+                    "last_week": int(last),
+                    "prev_week": int(prev),
+                    "growth": float(growth),
+                }
+            )
+
+        dfp = pd.DataFrame(out_rows)
+        if dfp.empty:
+            return dfp
+        dfp = dfp.sort_values(["ai_risk_prob", "predicted_next7d"], ascending=False).reset_index(drop=True)
+
+        # add facility_name if possible
+        try:
+            dff = df_select("facilities", {"select": "facility_id,facility_name,state,lga", "limit": "50000"})
+            if not dff.empty and "facility_id" in dff.columns:
+                dfp = dfp.merge(dff, on="facility_id", how="left")
+        except Exception:
+            pass
+
+        dfp["ai_risk_pct"] = (dfp["ai_risk_prob"] * 100.0).round(1)
+        return dfp
+    except Exception:
+        return pd.DataFrame()
+
+
+def _render_ai_banner_for_facility(dfp: pd.DataFrame):
+    """
+    Show AI alert banner on Home for current facility (or top national if organizer).
+    """
+    if dfp is None or dfp.empty:
+        st.info(f"{AI_ICON} AI Prediction: Not enough data yet. Add a few CONFIRMED TB events first.")
+        return
+
+    is_org = st.session_state.get("role") == "organizer"
+
+    if is_org:
+        row = dfp.iloc[0].to_dict()
+        fac_label = row.get("facility_name") or row.get("facility_id")
+        msg_title = f"{AI_ICON} AI Prediction: Next 7 days hotspot risk (Top facility: {fac_label})"
+    else:
+        df_me = dfp[dfp["facility_id"].astype(str) == str(facility_id)]
+        if df_me.empty:
+            st.info(f"{AI_ICON} AI Prediction: No confirmed TB trend yet for this facility.")
+            return
+        row = df_me.iloc[0].to_dict()
+        msg_title = f"{AI_ICON} AI Prediction: Next 7 days hotspot risk for your facility"
+
+    level = str(row.get("ai_level", "LOW")).upper()
+    pred = int(row.get("predicted_next7d", 0))
+    prob_pct = float(row.get("ai_risk_pct", 0.0))
+    last_w = int(row.get("last_week", 0))
+    prev_w = int(row.get("prev_week", 0))
+    growth = float(row.get("growth", 1.0))
+
+    css = "low"
+    if level == "WATCH":
+        css = "watch"
+    elif level == "HIGH":
+        css = "high"
+    elif level == "CRITICAL":
+        css = "critical"
+
+    actions = []
+    if level in ("HIGH", "CRITICAL"):
+        actions = [
+            "Increase rapid screening at OPD and triage",
+            "Prioritize GeneXpert testing for presumptive cases",
+            "Trigger contact tracing for confirmed cases",
+            "Enforce IPC (masking, ventilation) in high-traffic areas",
+        ]
+    elif level == "WATCH":
+        actions = [
+            "Enhance cough screening at entry points",
+            "Review confirmed cases daily",
+            "Escalate testing if symptoms surge",
+        ]
+    else:
+        actions = [
+            "Continue routine surveillance",
+            "Re-screen persistent cough cases",
+        ]
+
+    st.markdown(
+        f"""
+<div class="ohih-alert {css}">
+  <h3>{msg_title}</h3>
+  <p><b>AI Level:</b> {level} &nbsp; | &nbsp; <b>Predicted confirmed TB (next 7d):</b> {pred}
+     &nbsp; | &nbsp; <b>Risk Probability:</b> {prob_pct:.1f}%</p>
+  <p><b>Trend:</b> last week={last_w}, previous week={prev_w}, growth≈{growth:.2f}x</p>
+  <p><b>Recommended actions:</b></p>
+  <ul>
+    {''.join([f'<li>{a}</li>' for a in actions])}
+  </ul>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+# =========================
 # PAGES
 # =========================
 def page_home():
     render_topbar()
     section("Home")
-    st.success("✅ Authenticated. RLS isolates data per facility. WHO Dashboard + GIS + Alerts enabled.")
+    st.success("✅ Authenticated. RLS isolates data per facility. WHO Dashboard + GIS + Alerts + AI Prediction enabled.")
     st.write("Facility ID:", facility_id)
     st.write("Role:", st.session_state.get("role"))
 
-    # ✅ NEW: Outbreak banner on Home
-    st.divider()
-    st.subheader("🧠 Auto Outbreak Detection")
-    render_home_outbreak_banner()
+    # AI prediction on Home (banner + table)
+    section("AI Outbreak Prediction")
+    dfp = _ai_predict_hotspots(days_back=120)
+    _render_ai_banner_for_facility(dfp)
+
+    if dfp is not None and not dfp.empty:
+        show_cols = [c for c in ["facility_name", "state", "lga", "predicted_next7d", "ai_risk_pct", "ai_level", "last_week", "prev_week", "growth"] if c in dfp.columns]
+        st.caption("Top predicted hotspot facilities (AI, next 7 days)")
+        st.dataframe(dfp[show_cols].head(10), use_container_width=True, hide_index=True)
 
 
 def page_patients():
@@ -703,7 +707,11 @@ def page_patients():
             st.success(f"Saved ✅ Patient: {out.get('patient_id')}")
             st.rerun()
 
-    dfp = safe_select_with_order("patients", {"select": "*", "limit": "5000"}, ["created_at.desc", "updated_at.desc", "patient_id.desc"])
+    dfp = safe_select_with_order(
+        "patients",
+        {"select": "*", "limit": "5000"},
+        ["created_at.desc", "updated_at.desc", "patient_id.desc"],
+    )
     st.dataframe(dfp, use_container_width=True, hide_index=True)
 
 
@@ -859,7 +867,11 @@ def page_diagnosis_events():
         st.success("Saved ✅")
         st.rerun()
 
-    dfe = safe_select_with_order("events", {"select": "*", "limit": "5000"}, ["timestamp.desc", "created_at.desc", "event_id.desc"])
+    dfe = safe_select_with_order(
+        "events",
+        {"select": "*", "limit": "5000"},
+        ["timestamp.desc", "created_at.desc", "event_id.desc"],
+    )
     st.dataframe(dfe, use_container_width=True, hide_index=True)
 
 
@@ -889,7 +901,12 @@ def page_dots():
             st.rerun()
         else:
             if "duplicate key" in r.text.lower() or r.status_code == 409:
-                match = {"facility_id": f"eq.{facility_id}", "patient_id": f"eq.{pid}", "date": f"eq.{date.isoformat()}"}
+                match = {
+                    "facility_id": f"eq.{facility_id}",
+                    "patient_id": f"eq.{pid}",
+                    "date": f"eq.{date.isoformat()}",
+                }
+                # NOTE: updated_at may not exist; keep patch minimal
                 rp = rest_patch(
                     "dots_daily",
                     st.session_state["access_token"],
@@ -917,13 +934,18 @@ def page_adherence():
 
     missed_7 = st.number_input("Missed doses (last 7 days)", 0, 7, 0)
     missed_28 = st.number_input("Missed doses (last 28 days)", 0, 28, 0)
-    missed_streak = st.selectbox("Longest missed streak", ["0 days", "1–2 days", "3–6 days", "1 week", "2 weeks", "3 weeks", "1 month+"])
+    missed_streak = st.selectbox(
+        "Longest missed streak",
+        ["0 days", "1–2 days", "3–6 days", "1 week", "2 weeks", "3 weeks", "1 month+"],
+    )
     completed = st.checkbox("Completed regimen", False)
 
     adh_7 = max(0.0, 100.0 * (1 - missed_7 / 7))
     adh_28 = max(0.0, 100.0 * (1 - missed_28 / 28))
     flag = missed_28 >= 8
-    risk = "High" if flag or missed_streak in ("2 weeks", "3 weeks", "1 month+") else ("Moderate" if missed_streak in ("1 week", "3–6 days") else "Low")
+    risk = "High" if flag or missed_streak in ("2 weeks", "3 weeks", "1 month+") else (
+        "Moderate" if missed_streak in ("1 week", "3–6 days") else "Low"
+    )
 
     st.write(f"Adherence 7d: {adh_7:.1f}% | 28d: {adh_28:.1f}% | Risk: {risk}")
 
@@ -947,7 +969,11 @@ def page_adherence():
         st.success("Saved ✅")
         st.rerun()
 
-    dfa = safe_select_with_order("adherence", {"select": "*", "limit": "5000"}, ["timestamp.desc", "created_at.desc", "created_by.desc"])
+    dfa = safe_select_with_order(
+        "adherence",
+        {"select": "*", "limit": "5000"},
+        ["timestamp.desc", "created_at.desc", "created_by.desc"],
+    )
     st.dataframe(dfa, use_container_width=True, hide_index=True)
 
 
@@ -1332,10 +1358,27 @@ def page_outbreak_alerts():
     st.dataframe(dfh[show_cols].sort_values("confirmed_7d", ascending=False), use_container_width=True, hide_index=True)
 
 
+def page_ai_prediction():
+    render_topbar()
+    section("AI Prediction (Next 7 days)")
+    st.caption("AI uses recent confirmed TB weekly trend from events. No extra libraries, no DB changes.")
+
+    dfp = _ai_predict_hotspots(days_back=120)
+    _render_ai_banner_for_facility(dfp)
+
+    if dfp is None or dfp.empty:
+        st.warning("No AI prediction yet. Add more CONFIRMED TB or GeneXpert Positive events.")
+        return
+
+    show_cols = [c for c in ["facility_name", "state", "lga", "predicted_next7d", "ai_risk_pct", "ai_level", "last_week", "prev_week", "growth", "facility_id"] if c in dfp.columns]
+    st.subheader("Predicted hotspot ranking")
+    st.dataframe(dfp[show_cols].head(50), use_container_width=True, hide_index=True)
+
+
 def page_exports():
     render_topbar()
     section("Exports")
-    tables = ["patients", "events", "dots_daily", "adherence", "tb_treatment", "tb_contacts", "tb_drug_resistance", "tb_outbreak_alerts", "tb_alert_notifications"]
+    tables = ["patients", "events", "dots_daily", "adherence", "tb_treatment", "tb_contacts", "tb_drug_resistance", "tb_outbreak_alerts"]
     cols = st.columns(4)
     for i, t in enumerate(tables):
         try:
@@ -1376,6 +1419,7 @@ menu = [
     f"{TB_ICON} WHO Dashboard",
     f"{TB_ICON} GIS Heatmap",
     f"{TB_ICON} Outbreak Alerts",
+    f"{AI_ICON} AI Prediction",
     f"{TB_ICON} Exports",
 ]
 if st.session_state.get("role") == "organizer":
@@ -1407,6 +1451,8 @@ elif page.endswith("GIS Heatmap"):
     page_gis_heatmap()
 elif page.endswith("Outbreak Alerts"):
     page_outbreak_alerts()
+elif page.endswith("AI Prediction"):
+    page_ai_prediction()
 elif page.endswith("Exports"):
     page_exports()
 elif page.endswith("National View"):
