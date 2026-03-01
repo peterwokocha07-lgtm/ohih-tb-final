@@ -1,7 +1,7 @@
 import os
 import json
 import datetime as dt
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 
 import pandas as pd
 import requests
@@ -454,10 +454,9 @@ def classify_resistance(rr: bool, inh: bool, fq: bool, bdq: bool, lzd: bool) -> 
 
 
 # =========================
-# AI OUTBREAK PREDICTION (NO NEW LIBS)
+# AI OUTBREAK PREDICTION (WEIGHTED PRESUMPTIVES + DRIVERS)
 # =========================
 def _sigmoid(x: float) -> float:
-    # stable-ish sigmoid
     if x < -30:
         return 0.0
     if x > 30:
@@ -466,131 +465,296 @@ def _sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
+def _get_bool(df: pd.DataFrame, col: str) -> pd.Series:
+    """Return boolean series safely even if column missing."""
+    if col not in df.columns:
+        return pd.Series([False] * len(df))
+    v = df[col]
+    if v.dtype == bool:
+        return v.fillna(False)
+    # accept "true/false", 1/0, "t/f"
+    s = v.astype(str).str.strip().str.lower()
+    return s.isin(["true", "t", "1", "yes", "y"])
+
+
+def _get_num(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series([default] * len(df))
+    return pd.to_numeric(df[col], errors="coerce").fillna(default)
+
+
+def _is_confirmed_row(row_cat: str, row_genx: str) -> bool:
+    cat = (row_cat or "").strip().upper()
+    gx = (row_genx or "").strip().lower()
+    return (cat == "CONFIRMED TB") or (gx == "positive")
+
+
+def _ai_driver_definitions() -> List[Tuple[str, str, int]]:
+    """
+    (column_name, label, weight)
+    weights roughly match your screening logic importance.
+    """
+    return [
+        ("sx_cough_2w", "Cough ≥ 2 weeks", 3),
+        ("sx_hemoptysis", "Hemoptysis", 3),
+        ("sx_fever", "Fever", 1),
+        ("sx_night_sweats", "Night sweats", 1),
+        ("sx_weight_loss", "Weight loss", 1),
+        ("sx_chest_pain", "Chest pain / breathlessness", 1),
+        ("rf_contact_tb", "Contact with TB case", 2),
+        ("rf_prev_tb", "Previous TB treatment", 1),
+        ("rf_diabetes", "Diabetes (risk)", 1),
+        ("rf_malnutrition", "Malnutrition / underweight (risk)", 1),
+        ("comorbid_hiv", "HIV positive", 2),
+        ("comorbid_diabetes", "Diabetes (comorbidity)", 1),
+        ("comorbid_malnutrition", "Malnutrition (comorbidity)", 1),
+        ("comorbid_ckd", "Chronic kidney disease (CKD)", 1),
+        ("comorbid_copd", "COPD / chronic lung disease", 1),
+        ("comorbid_immunosuppressed", "Immunosuppressed", 1),
+        ("comorbid_cancer", "Cancer", 1),
+        ("comorbid_smoking", "Smoking", 1),
+        ("comorbid_alcohol", "Alcohol use", 1),
+    ]
+
+
+def _presumptive_weight(screening_score: float, screening_band: str, category: str, tb_prob: float) -> float:
+    """
+    Weight presumptives by screening_score:
+    - base 0.15
+    - +0.05 per score point up to 10 (max +0.50)
+    - +0.15 if HIGH band
+    - +0.10 if category HIGH
+    - +0.10 if tb_probability >= 0.60
+    cap to 0.90
+    """
+    s = float(screening_score or 0.0)
+    b = (screening_band or "").upper()
+    cat = (category or "").upper()
+    p = float(tb_prob or 0.0)
+
+    w = 0.15 + 0.05 * min(10.0, max(0.0, s))
+    if "HIGH" in b:
+        w += 0.15
+    if cat == "HIGH":
+        w += 0.10
+    if p >= 0.60:
+        w += 0.10
+    return float(max(0.0, min(0.90, w)))
+
+
+def _compute_top_drivers(dfe: pd.DataFrame, days_window: int = 30, top_n: int = 6) -> List[str]:
+    """
+    From last N days of (confirmed + high presumptive) events,
+    compute top drivers by contribution = count_true * weight.
+    Return list of friendly strings.
+    """
+    if dfe is None or dfe.empty:
+        return []
+
+    if "timestamp_dt" not in dfe.columns:
+        return []
+
+    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days_window)
+    df = dfe[dfe["timestamp_dt"] >= cutoff].copy()
+    if df.empty:
+        return []
+
+    # focus on "signal" events: confirmed OR HIGH presumptive
+    band = df.get("screening_band", pd.Series([""] * len(df))).astype(str).str.upper()
+    cat = df.get("category", pd.Series([""] * len(df))).astype(str).str.upper()
+    genx = df.get("genexpert", pd.Series([""] * len(df))).astype(str).str.lower()
+
+    is_confirmed = (cat == "CONFIRMED TB") | (genx == "positive")
+    is_high_presumptive = band.str.contains("HIGH") | (cat == "HIGH")
+    focus = df[is_confirmed | is_high_presumptive].copy()
+    if focus.empty:
+        return []
+
+    drivers = _ai_driver_definitions()
+    rows = []
+    n = len(focus)
+
+    for col, label, wt in drivers:
+        if col not in focus.columns:
+            continue
+        b = _get_bool(focus, col)
+        cnt = int(b.sum())
+        if cnt <= 0:
+            continue
+        pct = 100.0 * cnt / max(1, n)
+        contrib = cnt * wt
+        rows.append((contrib, cnt, pct, label))
+
+    rows.sort(reverse=True, key=lambda x: x[0])
+    rows = rows[:top_n]
+    return [f"{label} ({pct:.0f}%)" for _, _, pct, label in rows]
+
+
 def _ai_predict_hotspots(days_back: int = 120) -> pd.DataFrame:
     """
-    Predict next 7-day confirmed TB per facility using simple trend model:
-    - Weekly confirmed counts from events (CONFIRMED TB or GeneXpert Positive)
-    - Weighted moving average + growth factor
-    - Probability via sigmoid
-    Returns columns:
-      facility_id, predicted_next7d, ai_risk_prob, ai_level, last_week, prev_week, growth
+    Predict next 7-day TB surge per facility using a TB-SIGNAL time series:
+      TB_SIGNAL = confirmed(1.0) + presumptive_weight(0.0–0.9)
+    Where presumptive_weight depends on screening_score, band, category, tb_probability.
+
+    Output includes:
+      predicted_next7d_signal, predicted_next7d_confirmed (approx),
+      ai_risk_prob, ai_level, growth, top_drivers (string)
     """
     try:
-        # Pull lots (but reasonable) and filter client-side.
-        dfe = df_select("events", {"select": "facility_id,timestamp,category,genexpert", "limit": "50000"})
+        # safest: select "*" so we don't crash if schema changed
+        dfe = df_select("events", {"select": "*", "limit": "50000"})
         if dfe.empty:
             return pd.DataFrame()
 
-        # basic validation
-        for c in ["facility_id", "timestamp"]:
-            if c not in dfe.columns:
-                return pd.DataFrame()
+        if "facility_id" not in dfe.columns or "timestamp" not in dfe.columns:
+            return pd.DataFrame()
 
-        # Role filter: if not organizer, only current facility
+        # Role filter
         is_org = st.session_state.get("role") == "organizer"
         if not is_org:
             dfe = dfe[dfe["facility_id"].astype(str) == str(facility_id)]
 
-        # time filter
+        # Parse timestamp and filter time window
         dfe["timestamp_dt"] = pd.to_datetime(dfe["timestamp"], errors="coerce", utc=True)
-        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days_back)
         dfe = dfe[dfe["timestamp_dt"].notna()]
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days_back)
         dfe = dfe[dfe["timestamp_dt"] >= cutoff]
         if dfe.empty:
             return pd.DataFrame()
 
-        # confirmed flag
-        dfe["category"] = dfe.get("category", "").astype(str)
-        dfe["genexpert"] = dfe.get("genexpert", "").astype(str)
-        dfe["is_confirmed"] = (dfe["category"].str.upper() == "CONFIRMED TB") | (dfe["genexpert"].str.lower() == "positive")
+        # standardize fields (safe)
+        cat = dfe.get("category", pd.Series([""] * len(dfe))).astype(str)
+        genx = dfe.get("genexpert", pd.Series([""] * len(dfe))).astype(str)
+        band = dfe.get("screening_band", pd.Series([""] * len(dfe))).astype(str)
+        score = _get_num(dfe, "screening_score", 0.0)
+        tbp = _get_num(dfe, "tb_probability", 0.0)
 
-        dfe = dfe[dfe["is_confirmed"]]
-        if dfe.empty:
-            return pd.DataFrame()
+        # confirmed
+        is_conf = ((cat.astype(str).str.upper() == "CONFIRMED TB") | (genx.astype(str).str.lower() == "positive"))
 
-        # week start (Monday)
+        # presumptive = (HIGH/MODERATE category) OR ("HIGH" band) OR (tb_probability >= 0.5)
+        is_pres = (
+            cat.astype(str).str.upper().isin(["HIGH", "MODERATE"])
+            | band.astype(str).str.upper().str.contains("HIGH")
+            | (tbp >= 0.50)
+        )
+
+        # avoid double count
+        is_pres = is_pres & (~is_conf)
+
+        # compute presumptive weight per row
+        pres_w = []
+        for s, b, c, p in zip(score.tolist(), band.tolist(), cat.tolist(), tbp.tolist()):
+            pres_w.append(_presumptive_weight(s, b, c, p))
+        pres_w = pd.Series(pres_w)
+
+        # TB_SIGNAL
+        dfe["tb_signal"] = (is_conf.astype(float) * 1.0) + (is_pres.astype(float) * pres_w)
+
+        # Week buckets
         dfe["week_start"] = dfe["timestamp_dt"].dt.to_period("W-MON").dt.start_time
-        wk = dfe.groupby(["facility_id", "week_start"]).size().reset_index(name="confirmed_week")
+        wk = dfe.groupby(["facility_id", "week_start"]).agg(
+            tb_signal_week=("tb_signal", "sum"),
+            confirmed_week=(lambda x: 0, "size"),  # placeholder, we'll recompute below
+        ).reset_index()
 
-        # Build predictions per facility
+        # recompute confirmed_week properly
+        conf_only = dfe[is_conf].copy()
+        if not conf_only.empty:
+            conf_only["week_start"] = conf_only["timestamp_dt"].dt.to_period("W-MON").dt.start_time
+            wk_conf = conf_only.groupby(["facility_id", "week_start"]).size().reset_index(name="confirmed_week")
+            wk = wk.drop(columns=["confirmed_week"], errors="ignore").merge(wk_conf, on=["facility_id", "week_start"], how="left")
+        wk["confirmed_week"] = pd.to_numeric(wk.get("confirmed_week"), errors="coerce").fillna(0).astype(int)
+
+        # Add facility metadata if possible
+        try:
+            dff = df_select("facilities", {"select": "facility_id,facility_name,state,lga", "limit": "50000"})
+        except Exception:
+            dff = pd.DataFrame()
+
         out_rows = []
         for fac, g in wk.groupby("facility_id"):
             g = g.sort_values("week_start")
-            # ensure continuous weekly index
             last_week_start = g["week_start"].max()
-            # take last 10 weeks window
             start = last_week_start - pd.Timedelta(weeks=10)
             g = g[g["week_start"] >= start].copy()
 
-            # create complete weekly series
-            idx = pd.date_range(g["week_start"].min(), g["week_start"].max(), freq="W-MON", tz=None)
-            s = g.set_index("week_start")["confirmed_week"].reindex(idx, fill_value=0)
+            idx = pd.date_range(g["week_start"].min(), g["week_start"].max(), freq="W-MON")
+            s_sig = g.set_index("week_start")["tb_signal_week"].reindex(idx, fill_value=0.0)
+            s_conf = g.set_index("week_start")["confirmed_week"].reindex(idx, fill_value=0)
 
-            # last 3 weeks values
-            last = int(s.iloc[-1]) if len(s) >= 1 else 0
-            prev = int(s.iloc[-2]) if len(s) >= 2 else 0
-            prev2 = int(s.iloc[-3]) if len(s) >= 3 else 0
+            last_sig = float(s_sig.iloc[-1]) if len(s_sig) >= 1 else 0.0
+            prev_sig = float(s_sig.iloc[-2]) if len(s_sig) >= 2 else 0.0
+            prev2_sig = float(s_sig.iloc[-3]) if len(s_sig) >= 3 else 0.0
 
-            # weighted base + growth factor
-            base = 0.60 * last + 0.30 * prev + 0.10 * prev2
-            growth = (last + 1) / (prev + 1)
-            growth = max(0.60, min(1.80, float(growth)))
+            last_c = int(s_conf.iloc[-1]) if len(s_conf) >= 1 else 0
+            prev_c = int(s_conf.iloc[-2]) if len(s_conf) >= 2 else 0
 
-            pred = int(round(base * growth))
-            pred = max(0, pred)
+            base = 0.60 * last_sig + 0.30 * prev_sig + 0.10 * prev2_sig
+            growth = (last_sig + 0.50) / (prev_sig + 0.50)
+            growth = max(0.60, min(1.90, float(growth)))
 
-            # Probability: more weight on predicted counts and growth
-            # - increase score when pred >=3 and growth >1
+            pred_signal = max(0, int(round(base * growth)))
+
+            # approximate confirmed from signal (conservative)
+            # (signal includes presumptives, so confirmed prediction <= signal)
+            pred_confirmed = max(0, int(round(min(pred_signal, 0.65 * pred_signal + 0.35 * last_c))))
+
+            # Probability: driven by signal and growth and confirmed change
             import math
-            score = (pred - 2.0) + 1.4 * math.log1p(max(0.0, growth - 1.0)) + 0.25 * (last - prev)
-            prob = float(_sigmoid(score))
+            score_ai = (pred_signal - 2.2) + 1.6 * math.log1p(max(0.0, growth - 1.0)) + 0.35 * (last_c - prev_c)
+            prob = float(_sigmoid(score_ai))
 
-            if prob >= 0.85 or pred >= 5:
+            if prob >= 0.85 or pred_signal >= 7:
                 level = "CRITICAL"
-            elif prob >= 0.60 or pred >= 3:
+            elif prob >= 0.60 or pred_signal >= 4:
                 level = "HIGH"
-            elif prob >= 0.35 or pred >= 2:
+            elif prob >= 0.35 or pred_signal >= 2:
                 level = "WATCH"
             else:
                 level = "LOW"
 
+            # drivers for THIS facility
+            dfe_fac = dfe[dfe["facility_id"].astype(str) == str(fac)].copy()
+            drivers_list = _compute_top_drivers(dfe_fac, days_window=30, top_n=6)
+            drivers_str = ", ".join(drivers_list) if drivers_list else "Insufficient driver data"
+
             out_rows.append(
                 {
                     "facility_id": str(fac),
-                    "predicted_next7d": int(pred),
+                    "predicted_next7d_signal": int(pred_signal),
+                    "predicted_next7d_confirmed": int(pred_confirmed),
                     "ai_risk_prob": float(prob),
                     "ai_level": level,
-                    "last_week": int(last),
-                    "prev_week": int(prev),
+                    "last_week_signal": float(last_sig),
+                    "prev_week_signal": float(prev_sig),
                     "growth": float(growth),
+                    "top_drivers": drivers_str,
                 }
             )
 
         dfp = pd.DataFrame(out_rows)
         if dfp.empty:
             return dfp
-        dfp = dfp.sort_values(["ai_risk_prob", "predicted_next7d"], ascending=False).reset_index(drop=True)
 
-        # add facility_name if possible
-        try:
-            dff = df_select("facilities", {"select": "facility_id,facility_name,state,lga", "limit": "50000"})
-            if not dff.empty and "facility_id" in dff.columns:
-                dfp = dfp.merge(dff, on="facility_id", how="left")
-        except Exception:
-            pass
+        if not dff.empty and "facility_id" in dff.columns:
+            dfp = dfp.merge(dff, on="facility_id", how="left")
 
         dfp["ai_risk_pct"] = (dfp["ai_risk_prob"] * 100.0).round(1)
+
+        dfp = dfp.sort_values(
+            ["ai_risk_prob", "predicted_next7d_signal", "predicted_next7d_confirmed"],
+            ascending=False
+        ).reset_index(drop=True)
+
         return dfp
     except Exception:
         return pd.DataFrame()
 
 
 def _render_ai_banner_for_facility(dfp: pd.DataFrame):
-    """
-    Show AI alert banner on Home for current facility (or top national if organizer).
-    """
     if dfp is None or dfp.empty:
-        st.info(f"{AI_ICON} AI Prediction: Not enough data yet. Add a few CONFIRMED TB events first.")
+        st.info(f"{AI_ICON} AI Prediction: Not enough data yet. Add more events (presumptive/confirmed) first.")
         return
 
     is_org = st.session_state.get("role") == "organizer"
@@ -602,17 +766,19 @@ def _render_ai_banner_for_facility(dfp: pd.DataFrame):
     else:
         df_me = dfp[dfp["facility_id"].astype(str) == str(facility_id)]
         if df_me.empty:
-            st.info(f"{AI_ICON} AI Prediction: No confirmed TB trend yet for this facility.")
+            st.info(f"{AI_ICON} AI Prediction: No trend yet for this facility.")
             return
         row = df_me.iloc[0].to_dict()
         msg_title = f"{AI_ICON} AI Prediction: Next 7 days hotspot risk for your facility"
 
     level = str(row.get("ai_level", "LOW")).upper()
-    pred = int(row.get("predicted_next7d", 0))
+    pred_sig = int(row.get("predicted_next7d_signal", 0))
+    pred_conf = int(row.get("predicted_next7d_confirmed", 0))
     prob_pct = float(row.get("ai_risk_pct", 0.0))
-    last_w = int(row.get("last_week", 0))
-    prev_w = int(row.get("prev_week", 0))
+    last_sig = float(row.get("last_week_signal", 0.0))
+    prev_sig = float(row.get("prev_week_signal", 0.0))
     growth = float(row.get("growth", 1.0))
+    drivers = str(row.get("top_drivers", "")).strip()
 
     css = "low"
     if level == "WATCH":
@@ -625,30 +791,32 @@ def _render_ai_banner_for_facility(dfp: pd.DataFrame):
     actions = []
     if level in ("HIGH", "CRITICAL"):
         actions = [
-            "Increase rapid screening at OPD and triage",
-            "Prioritize GeneXpert testing for presumptive cases",
-            "Trigger contact tracing for confirmed cases",
-            "Enforce IPC (masking, ventilation) in high-traffic areas",
+            "Increase rapid cough screening at triage/OPD (all adults)",
+            "Prioritize GeneXpert for HIGH screening band and contacts",
+            "Trigger contact tracing for confirmed cases immediately",
+            "Strengthen IPC: masks + ventilation + separation of coughers",
         ]
     elif level == "WATCH":
         actions = [
-            "Enhance cough screening at entry points",
-            "Review confirmed cases daily",
-            "Escalate testing if symptoms surge",
+            "Enhance entry screening; review presumptives daily",
+            "Escalate to GeneXpert if symptoms persist/worsen",
+            "Audit lab turnaround time and sputum collection quality",
         ]
     else:
         actions = [
-            "Continue routine surveillance",
-            "Re-screen persistent cough cases",
+            "Continue routine surveillance and patient education",
+            "Re-screen persistent cough cases and high-risk contacts",
         ]
 
     st.markdown(
         f"""
 <div class="ohih-alert {css}">
   <h3>{msg_title}</h3>
-  <p><b>AI Level:</b> {level} &nbsp; | &nbsp; <b>Predicted confirmed TB (next 7d):</b> {pred}
+  <p><b>AI Level:</b> {level} &nbsp; | &nbsp; <b>Predicted TB signal (next 7d):</b> {pred_sig}
+     &nbsp; | &nbsp; <b>Predicted confirmed (approx):</b> {pred_conf}
      &nbsp; | &nbsp; <b>Risk Probability:</b> {prob_pct:.1f}%</p>
-  <p><b>Trend:</b> last week={last_w}, previous week={prev_w}, growth≈{growth:.2f}x</p>
+  <p><b>Trend:</b> last week signal={last_sig:.1f}, previous={prev_sig:.1f}, growth≈{growth:.2f}x</p>
+  <p><b>Why AI says risk is high (top drivers, last 30 days):</b> {drivers}</p>
   <p><b>Recommended actions:</b></p>
   <ul>
     {''.join([f'<li>{a}</li>' for a in actions])}
@@ -665,18 +833,24 @@ def _render_ai_banner_for_facility(dfp: pd.DataFrame):
 def page_home():
     render_topbar()
     section("Home")
-    st.success("✅ Authenticated. RLS isolates data per facility. WHO Dashboard + GIS + Alerts + AI Prediction enabled.")
+    st.success("✅ Authenticated. RLS isolates data per facility. WHO + GIS + Alerts + AI Prediction enabled.")
     st.write("Facility ID:", facility_id)
     st.write("Role:", st.session_state.get("role"))
 
-    # AI prediction on Home (banner + table)
     section("AI Outbreak Prediction")
     dfp = _ai_predict_hotspots(days_back=120)
     _render_ai_banner_for_facility(dfp)
 
     if dfp is not None and not dfp.empty:
-        show_cols = [c for c in ["facility_name", "state", "lga", "predicted_next7d", "ai_risk_pct", "ai_level", "last_week", "prev_week", "growth"] if c in dfp.columns]
-        st.caption("Top predicted hotspot facilities (AI, next 7 days)")
+        show_cols = [c for c in [
+            "facility_name", "state", "lga",
+            "predicted_next7d_signal", "predicted_next7d_confirmed",
+            "ai_risk_pct", "ai_level",
+            "last_week_signal", "prev_week_signal", "growth",
+            "top_drivers"
+        ] if c in dfp.columns]
+
+        st.caption("Top predicted hotspot facilities (AI, next 7 days). TB signal = confirmed + weighted presumptives.")
         st.dataframe(dfp[show_cols].head(10), use_container_width=True, hide_index=True)
 
 
@@ -901,12 +1075,7 @@ def page_dots():
             st.rerun()
         else:
             if "duplicate key" in r.text.lower() or r.status_code == 409:
-                match = {
-                    "facility_id": f"eq.{facility_id}",
-                    "patient_id": f"eq.{pid}",
-                    "date": f"eq.{date.isoformat()}",
-                }
-                # NOTE: updated_at may not exist; keep patch minimal
+                match = {"facility_id": f"eq.{facility_id}", "patient_id": f"eq.{pid}", "date": f"eq.{date.isoformat()}"}
                 rp = rest_patch(
                     "dots_daily",
                     st.session_state["access_token"],
@@ -934,18 +1103,13 @@ def page_adherence():
 
     missed_7 = st.number_input("Missed doses (last 7 days)", 0, 7, 0)
     missed_28 = st.number_input("Missed doses (last 28 days)", 0, 28, 0)
-    missed_streak = st.selectbox(
-        "Longest missed streak",
-        ["0 days", "1–2 days", "3–6 days", "1 week", "2 weeks", "3 weeks", "1 month+"],
-    )
+    missed_streak = st.selectbox("Longest missed streak", ["0 days", "1–2 days", "3–6 days", "1 week", "2 weeks", "3 weeks", "1 month+"])
     completed = st.checkbox("Completed regimen", False)
 
     adh_7 = max(0.0, 100.0 * (1 - missed_7 / 7))
     adh_28 = max(0.0, 100.0 * (1 - missed_28 / 28))
     flag = missed_28 >= 8
-    risk = "High" if flag or missed_streak in ("2 weeks", "3 weeks", "1 month+") else (
-        "Moderate" if missed_streak in ("1 week", "3–6 days") else "Low"
-    )
+    risk = "High" if flag or missed_streak in ("2 weeks", "3 weeks", "1 month+") else ("Moderate" if missed_streak in ("1 week", "3–6 days") else "Low")
 
     st.write(f"Adherence 7d: {adh_7:.1f}% | 28d: {adh_28:.1f}% | Risk: {risk}")
 
@@ -969,11 +1133,7 @@ def page_adherence():
         st.success("Saved ✅")
         st.rerun()
 
-    dfa = safe_select_with_order(
-        "adherence",
-        {"select": "*", "limit": "5000"},
-        ["timestamp.desc", "created_at.desc", "created_by.desc"],
-    )
+    dfa = safe_select_with_order("adherence", {"select": "*", "limit": "5000"}, ["timestamp.desc", "created_at.desc", "created_by.desc"])
     st.dataframe(dfa, use_container_width=True, hide_index=True)
 
 
@@ -1361,16 +1521,22 @@ def page_outbreak_alerts():
 def page_ai_prediction():
     render_topbar()
     section("AI Prediction (Next 7 days)")
-    st.caption("AI uses recent confirmed TB weekly trend from events. No extra libraries, no DB changes.")
+    st.caption("AI uses TB signal = confirmed + weighted presumptives (weighted by screening score). It also explains WHY risk is high.")
 
     dfp = _ai_predict_hotspots(days_back=120)
     _render_ai_banner_for_facility(dfp)
 
     if dfp is None or dfp.empty:
-        st.warning("No AI prediction yet. Add more CONFIRMED TB or GeneXpert Positive events.")
+        st.warning("No AI prediction yet. Add more events (HIGH/MODERATE with screening_score, and confirmed).")
         return
 
-    show_cols = [c for c in ["facility_name", "state", "lga", "predicted_next7d", "ai_risk_pct", "ai_level", "last_week", "prev_week", "growth", "facility_id"] if c in dfp.columns]
+    show_cols = [c for c in [
+        "facility_name", "state", "lga",
+        "predicted_next7d_signal", "predicted_next7d_confirmed",
+        "ai_risk_pct", "ai_level", "growth",
+        "top_drivers", "facility_id"
+    ] if c in dfp.columns]
+
     st.subheader("Predicted hotspot ranking")
     st.dataframe(dfp[show_cols].head(50), use_container_width=True, hide_index=True)
 
