@@ -1,7 +1,7 @@
 import os
 import json
 import datetime as dt
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import pandas as pd
 import requests
@@ -154,6 +154,10 @@ def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
+def iso_days_ago(days: int) -> str:
+    return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
+
+
 # =========================
 # REST HELPERS
 # =========================
@@ -206,7 +210,7 @@ def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return rows[0] if isinstance(rows, list) and rows else (rows or {})
 
 
-def safe_select_with_order(table: str, base_params: Dict[str, str], order_candidates) -> pd.DataFrame:
+def safe_select_with_order(table: str, base_params: Dict[str, str], order_candidates: List[str]) -> pd.DataFrame:
     last_err = None
     for o in order_candidates:
         try:
@@ -220,11 +224,18 @@ def safe_select_with_order(table: str, base_params: Dict[str, str], order_candid
     return df_select(table, base_params)
 
 
+def table_columns_best_effort(table: str) -> set:
+    try:
+        d = df_select(table, {"select": "*", "limit": "1"})
+        return set([str(c) for c in d.columns])
+    except Exception:
+        return set()
+
+
 # =========================
 # AUTH (CLEAN + RELIABLE)
 # =========================
 def auth_sign_in(email: str, password: str) -> Dict[str, Any]:
-    # grant_type sent via params (works reliably with Supabase)
     url = f"{AUTH_BASE}/token"
     params = {"grant_type": "password"}
     payload = {"email": email, "password": password}
@@ -244,6 +255,7 @@ def ss_init():
     st.session_state.setdefault("profile", {})
     st.session_state.setdefault("facility_name", "")
     st.session_state.setdefault("role", "standard")
+    st.session_state.setdefault("local_alert_keys", set())  # in-memory duplicate guard
 
 
 ss_init()
@@ -437,12 +449,9 @@ def classify_resistance(rr: bool, inh: bool, fq: bool, bdq: bool, lzd: bool) -> 
 
 
 # =========================
-# OUTBREAK BANNER (SHOW ON HOME)
+# OUTBREAK: HOME BANNER + TOP 5 + TREND + AUTO-LOGGING
 # =========================
-def get_hotspot_rows() -> pd.DataFrame:
-    """
-    Reads v_hotspots. Organizer sees all; others see their facility only.
-    """
+def load_hotspots_for_scope() -> pd.DataFrame:
     try:
         dfh = df_select("v_hotspots", {"select": "*", "limit": "50000"})
         if dfh.empty:
@@ -451,71 +460,194 @@ def get_hotspot_rows() -> pd.DataFrame:
             dfh = dfh[dfh["facility_id"].astype(str) == str(facility_id)]
         return dfh
     except Exception:
-        return pd.DataFrame([])
+        return pd.DataFrame()
 
 
-def render_outbreak_banner():
+def compute_confirmed_trend_last_7d() -> pd.DataFrame:
+    # Pull only recent events for speed
+    try:
+        since = iso_days_ago(7)
+        dfe = df_select(
+            "events",
+            {
+                "select": "timestamp,category,genexpert",
+                "timestamp": f"gte.{since}",
+                "limit": "50000",
+            },
+        )
+        if dfe.empty or "timestamp" not in dfe.columns:
+            return pd.DataFrame(columns=["date", "confirmed"])
+        dfe["timestamp"] = pd.to_datetime(dfe["timestamp"], errors="coerce", utc=True)
+        dfe = dfe.dropna(subset=["timestamp"])
+        dfe["date"] = dfe["timestamp"].dt.date.astype(str)
+        dfe["category"] = dfe.get("category", "").astype(str)
+        dfe["genexpert"] = dfe.get("genexpert", "").astype(str)
+        confirmed_mask = (dfe["category"] == "CONFIRMED TB") | (dfe["genexpert"] == "Positive")
+        out = dfe[confirmed_mask].groupby("date").size().reset_index(name="confirmed")
+        if out.empty:
+            return pd.DataFrame(columns=["date", "confirmed"])
+        out = out.sort_values("date")
+        return out
+    except Exception:
+        return pd.DataFrame(columns=["date", "confirmed"])
+
+
+def auto_log_outbreak_alerts_best_effort(dfh: pd.DataFrame):
     """
-    Shows the most severe hotspot (WATCH/HIGH/CRITICAL) as a banner.
-    If no hotspot exists, shows nothing (no noise).
+    Auto-log HIGH/CRITICAL hotspots into tb_outbreak_alerts (best effort).
+    - Avoid duplicates using (facility_id, alert_date, hotspot_level) if possible.
+    - Also guards duplicates in memory during current session.
     """
-    dfh = get_hotspot_rows()
+    if dfh is None or dfh.empty:
+        return
+
+    level_col = "hotspot_level" if "hotspot_level" in dfh.columns else None
+    if not level_col:
+        return
+
+    df2 = dfh.copy()
+    df2[level_col] = df2[level_col].astype(str).str.upper()
+
+    # prioritize strong levels
+    df2 = df2[df2[level_col].isin(["HIGH", "CRITICAL"])]
+    if df2.empty:
+        return
+
+    cols_alert = table_columns_best_effort("tb_outbreak_alerts")
+    if not cols_alert:
+        # table not ready or no permission
+        return
+
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+
+    # Best-effort: get existing alerts for today (if alert_date exists)
+    existing_keys = set()
+    try:
+        if "alert_date" in cols_alert:
+            q = df_select(
+                "tb_outbreak_alerts",
+                {
+                    "select": "facility_id,hotspot_level,alert_date",
+                    "alert_date": f"eq.{today}",
+                    "limit": "50000",
+                },
+            )
+            if not q.empty:
+                for _, r in q.iterrows():
+                    existing_keys.add(
+                        f"{str(r.get('facility_id'))}|{str(r.get('hotspot_level')).upper()}|{str(r.get('alert_date'))}"
+                    )
+    except Exception:
+        pass
+
+    for _, r in df2.iterrows():
+        fid = str(r.get("facility_id", facility_id))
+        lvl = str(r.get(level_col, "")).upper()
+        conf7 = int(pd.to_numeric(r.get("confirmed_7d", 0), errors="coerce") or 0)
+        ratio = float(pd.to_numeric(r.get("ratio", 0), errors="coerce") or 0)
+
+        # session duplicate guard (even if DB check fails)
+        mem_key = f"{fid}|{lvl}|{today}|{conf7}|{ratio}"
+        if mem_key in st.session_state["local_alert_keys"]:
+            continue
+
+        # DB duplicate guard (if possible)
+        db_key = f"{fid}|{lvl}|{today}"
+        if db_key in existing_keys:
+            st.session_state["local_alert_keys"].add(mem_key)
+            continue
+
+        payload_all = {
+            "facility_id": fid,
+            "facility_name": str(r.get("facility_name", st.session_state.get("facility_name", ""))),
+            "state": str(r.get("state", "")),
+            "lga": str(r.get("lga", "")),
+            "hotspot_level": lvl,
+            "confirmed_7d": conf7,
+            "confirmed_prev_28d": int(pd.to_numeric(r.get("confirmed_prev_28d", 0), errors="coerce") or 0),
+            "ratio": ratio,
+            "alert_date": today,
+            "notes": f"Auto-alert from v_hotspots on {today}",
+            "created_at": now_iso(),
+        }
+
+        # keep only columns that exist (prevents PGRST204 missing column errors)
+        payload = {k: v for k, v in payload_all.items() if k in cols_alert}
+
+        # Try insert; if fails, ignore (no crash)
+        try:
+            insert_row("tb_outbreak_alerts", payload)
+            st.session_state["local_alert_keys"].add(mem_key)
+        except Exception:
+            # do not crash home page
+            pass
+
+
+def render_home_outbreak_panel():
+    """
+    (1) Banner
+    (2) Top 5 table
+    (3) 7-day confirmed trend
+    (4) Auto alert logging
+    """
+    dfh = load_hotspots_for_scope()
+
+    # Auto-log first (best effort)
+    auto_log_outbreak_alerts_best_effort(dfh)
+
+    st.markdown("### 🚨 Auto Outbreak Detection (Live)")
+
     if dfh.empty:
+        st.info("No hotspot data yet. Add diagnosis events / confirmed TB records to activate outbreak signals.")
         return
 
-    if "hotspot_level" not in dfh.columns:
-        return
+    # Normalize numeric cols
+    for c in ["confirmed_7d", "confirmed_prev_28d", "ratio"]:
+        if c in dfh.columns:
+            dfh[c] = pd.to_numeric(dfh[c], errors="coerce")
 
-    dfh = dfh[dfh["hotspot_level"].isin(["WATCH", "HIGH", "CRITICAL"])].copy()
-    if dfh.empty:
-        return
-
-    # pick the worst hotspot
-    rank = {"CRITICAL": 3, "HIGH": 2, "WATCH": 1}
-    dfh["rank"] = dfh["hotspot_level"].map(rank).fillna(0).astype(int)
-
-    # Ensure numeric ordering fields exist
-    if "confirmed_7d" in dfh.columns:
-        dfh["confirmed_7d"] = pd.to_numeric(dfh["confirmed_7d"], errors="coerce").fillna(0)
+    lvl_col = "hotspot_level" if "hotspot_level" in dfh.columns else None
+    if lvl_col:
+        dfh[lvl_col] = dfh[lvl_col].astype(str).str.upper()
     else:
-        dfh["confirmed_7d"] = 0
-    if "ratio" in dfh.columns:
-        dfh["ratio"] = pd.to_numeric(dfh["ratio"], errors="coerce").fillna(0)
-    else:
-        dfh["ratio"] = 0
-    if "confirmed_prev_28d" in dfh.columns:
-        dfh["confirmed_prev_28d"] = pd.to_numeric(dfh["confirmed_prev_28d"], errors="coerce").fillna(0)
-    else:
-        dfh["confirmed_prev_28d"] = 0
+        dfh["hotspot_level"] = "UNKNOWN"
+        lvl_col = "hotspot_level"
 
-    worst = dfh.sort_values(["rank", "confirmed_7d", "ratio"], ascending=False).iloc[0].to_dict()
+    # Banner logic
+    high_df = dfh[dfh[lvl_col].isin(["CRITICAL", "HIGH"])].copy()
+    if not high_df.empty:
+        top = high_df.sort_values(["confirmed_7d", "ratio"], ascending=False).head(1)
+        top_name = str(top.get("facility_name", pd.Series([""])).iloc[0]) if "facility_name" in top.columns else "this facility"
+        top_state = str(top.get("state", pd.Series([""])).iloc[0]) if "state" in top.columns else ""
+        top_lga = str(top.get("lga", pd.Series([""])).iloc[0]) if "lga" in top.columns else ""
+        top_lvl = str(top.get(lvl_col, pd.Series(["HIGH"])).iloc[0])
+        top_c7 = int((top.get("confirmed_7d", pd.Series([0])).iloc[0]) or 0)
+        top_ratio = float((top.get("ratio", pd.Series([0.0])).iloc[0]) or 0.0)
 
-    level = str(worst.get("hotspot_level", "WATCH"))
-    fac = str(worst.get("facility_name", "—"))
-    state = str(worst.get("state", "—"))
-    lga = str(worst.get("lga", "—"))
-    c7 = int(worst.get("confirmed_7d", 0) or 0)
-    c28 = int(worst.get("confirmed_prev_28d", 0) or 0)
-    ratio = worst.get("ratio", 0)
-
-    if level == "CRITICAL":
-        st.error(
-            f"🚨 **TB HOTSPOT DETECTED (CRITICAL)** — {fac} ({lga}, {state}) | "
-            f"Confirmed TB last 7 days: **{c7}** | Prev 28 days: **{c28}** | Ratio: **{ratio}x**\n\n"
-            f"**Action:** Activate rapid response, intensify screening + GeneXpert, contact tracing, IPC now."
-        )
-    elif level == "HIGH":
-        st.warning(
-            f"⚠️ **TB HOTSPOT WARNING (HIGH)** — {fac} ({lga}, {state}) | "
-            f"Confirmed TB last 7 days: **{c7}** | Prev 28 days: **{c28}** | Ratio: **{ratio}x**\n\n"
-            f"**Action:** Scale screening, prioritize GeneXpert, review clustering."
-        )
+        msg = f"**{top_lvl} hotspot detected** — {top_name} ({top_lga}, {top_state}) | Confirmed 7d: **{top_c7}** | Surge ratio: **{top_ratio:.2f}x**"
+        if top_lvl == "CRITICAL":
+            st.error(msg)
+        else:
+            st.warning(msg)
     else:
-        st.info(
-            f"👀 **TB HOTSPOT WATCH** — {fac} ({lga}, {state}) | "
-            f"Confirmed TB last 7 days: **{c7}** | Prev 28 days: **{c28}** | Ratio: **{ratio}x**\n\n"
-            f"**Action:** Monitor; re-check in 48–72 hours."
-        )
+        st.success("No HIGH/CRITICAL hotspot detected right now (based on the last 7 days vs previous 28 days).")
+
+    # Top 5 table
+    st.markdown("#### 🏆 Top 5 Hotspots (Last 7 Days)")
+    show_cols = [c for c in ["facility_name", "state", "lga", "confirmed_7d", "confirmed_prev_28d", "ratio", "hotspot_level"] if c in dfh.columns]
+    if not show_cols:
+        st.info("Hotspot view available, but expected columns were not found.")
+    else:
+        top5 = dfh.sort_values(["confirmed_7d", "ratio"], ascending=False).head(5)
+        st.dataframe(top5[show_cols], use_container_width=True, hide_index=True)
+
+    # Trend chart
+    st.markdown("#### 📈 Confirmed TB Trend (Last 7 Days)")
+    trend = compute_confirmed_trend_last_7d()
+    if trend.empty:
+        st.info("No confirmed TB records in the last 7 days yet.")
+    else:
+        st.line_chart(trend.set_index("date")["confirmed"])
 
 
 # =========================
@@ -524,13 +656,12 @@ def render_outbreak_banner():
 def page_home():
     render_topbar()
     section("Home")
-
-    # ✅ Outbreak detection banner on Home
-    render_outbreak_banner()
-
     st.success("✅ Authenticated. RLS isolates data per facility. WHO Dashboard + GIS + Alerts enabled.")
     st.write("Facility ID:", facility_id)
     st.write("Role:", st.session_state.get("role"))
+
+    st.divider()
+    render_home_outbreak_panel()
 
 
 def page_patients():
@@ -710,7 +841,7 @@ def page_diagnosis_events():
             "comorbid_copd": comorbid_copd,
             "comorbid_cancer": comorbid_cancer,
             "comorbid_immunosuppressed": comorbid_immunosuppressed,
-            # Decision outputs (only save if your DB has these columns)
+            # Decision outputs
             "screening_score": int(score),
             "screening_band": screening_band,
             "recommendation": recommendation,
@@ -753,24 +884,34 @@ def page_dots():
             st.success("Saved ✅")
             st.rerun()
         else:
-            # if duplicate, update WITHOUT requiring updated_at column
             if "duplicate key" in r.text.lower() or r.status_code == 409:
                 match = {
                     "facility_id": f"eq.{facility_id}",
                     "patient_id": f"eq.{pid}",
                     "date": f"eq.{date.isoformat()}",
                 }
+                # Some schemas don't have updated_at; try update with it, then fallback
                 rp = rest_patch(
                     "dots_daily",
                     st.session_state["access_token"],
                     match,
-                    {"dose_taken": bool(dose_taken), "note": note.strip()},
+                    {"dose_taken": bool(dose_taken), "note": note.strip(), "updated_at": now_iso()},
                 )
                 if rp.status_code in (200, 204):
                     st.success("Updated ✅")
                     st.rerun()
                 else:
-                    st.error(f"DOTS save failed: {rp.status_code} {rp.text}")
+                    rp2 = rest_patch(
+                        "dots_daily",
+                        st.session_state["access_token"],
+                        match,
+                        {"dose_taken": bool(dose_taken), "note": note.strip()},
+                    )
+                    if rp2.status_code in (200, 204):
+                        st.success("Updated ✅")
+                        st.rerun()
+                    else:
+                        st.error(f"DOTS save failed: {rp2.status_code} {rp2.text}")
             else:
                 st.error(f"DOTS save failed: {r.status_code} {r.text}")
 
@@ -787,13 +928,18 @@ def page_adherence():
 
     missed_7 = st.number_input("Missed doses (last 7 days)", 0, 7, 0)
     missed_28 = st.number_input("Missed doses (last 28 days)", 0, 28, 0)
-    missed_streak = st.selectbox("Longest missed streak", ["0 days", "1–2 days", "3–6 days", "1 week", "2 weeks", "3 weeks", "1 month+"])
+    missed_streak = st.selectbox(
+        "Longest missed streak",
+        ["0 days", "1–2 days", "3–6 days", "1 week", "2 weeks", "3 weeks", "1 month+"],
+    )
     completed = st.checkbox("Completed regimen", False)
 
     adh_7 = max(0.0, 100.0 * (1 - missed_7 / 7))
     adh_28 = max(0.0, 100.0 * (1 - missed_28 / 28))
     flag = missed_28 >= 8
-    risk = "High" if flag or missed_streak in ("2 weeks", "3 weeks", "1 month+") else ("Moderate" if missed_streak in ("1 week", "3–6 days") else "Low")
+    risk = "High" if flag or missed_streak in ("2 weeks", "3 weeks", "1 month+") else (
+        "Moderate" if missed_streak in ("1 week", "3–6 days") else "Low"
+    )
 
     st.write(f"Adherence 7d: {adh_7:.1f}% | 28d: {adh_28:.1f}% | Risk: {risk}")
 
@@ -1032,6 +1178,7 @@ def page_genexpert_import():
 
                 category = "CONFIRMED TB" if mtb_detected else "LOW"
                 genx = "Positive" if mtb_detected else "Negative"
+
                 insert_row(
                     "events",
                     {
@@ -1204,6 +1351,16 @@ def page_outbreak_alerts():
     show_cols = [c for c in ["facility_name", "state", "lga", "confirmed_7d", "confirmed_prev_28d", "ratio", "hotspot_level"] if c in dfh.columns]
     st.subheader("Hotspot ranking (last 7 days)")
     st.dataframe(dfh[show_cols].sort_values("confirmed_7d", ascending=False), use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Logged alerts (tb_outbreak_alerts)")
+    try:
+        dfa = df_select("tb_outbreak_alerts", {"select": "*", "limit": "50000"})
+        if st.session_state.get("role") != "organizer" and "facility_id" in dfa.columns:
+            dfa = dfa[dfa["facility_id"].astype(str) == str(facility_id)]
+        st.dataframe(dfa.sort_values([c for c in ["alert_date", "created_at"] if c in dfa.columns], ascending=False), use_container_width=True, hide_index=True)
+    except Exception:
+        st.info("tb_outbreak_alerts table not available (or no permission).")
 
 
 def page_exports():
