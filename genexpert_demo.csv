@@ -1,0 +1,4 @@
+full_name,age,sex,mtb_result,rif_result,notes
+John Doe,34,Male,Detected,Not detected,Classic symptoms
+Mary Ada,22,Female,Not detected,Not detected,Screening
+Peter Okoro,41,Male,Detected,Detected,Rif resistance detected
