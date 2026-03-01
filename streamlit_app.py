@@ -13,7 +13,7 @@ except Exception:
     px = None
 
 # ============================================================
-# BRANDING (OHIH-TB) + NATIONAL DASHBOARD LOOK (NO PATCHING)
+# BRANDING (OHIH-TB) + NATIONAL DASHBOARD LOOK
 # ============================================================
 TB_ICON = "🫁"
 APP_SHORT = "OHIH-TB"
@@ -115,6 +115,7 @@ hr{
     unsafe_allow_html=True,
 )
 
+
 def section(title: str):
     st.markdown(
         f"""
@@ -125,8 +126,9 @@ def section(title: str):
         unsafe_allow_html=True,
     )
 
+
 # =========================
-# CONFIG / SECRETS
+# CONFIG / SECRETS (CLEAN)
 # =========================
 def safe_secret(name: str, default: str = "") -> str:
     try:
@@ -136,24 +138,21 @@ def safe_secret(name: str, default: str = "") -> str:
         pass
     return os.getenv(name, default)
 
-import streamlit as st
 
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "").strip()
-SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", "").strip()
-
-AUTH_BASE = f"{SUPABASE_URL}/auth/v1"
-REST_BASE = f"{SUPABASE_URL}/rest/v1"
+SUPABASE_URL = safe_secret("SUPABASE_URL", "").strip()
+SUPABASE_ANON_KEY = safe_secret("SUPABASE_ANON_KEY", "").strip()
 
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.error("Missing SUPABASE_URL or SUPABASE_ANON_KEY in Streamlit Secrets.")
     st.stop()
 
-# Build API base URLs from SUPABASE_URL
 AUTH_BASE = f"{SUPABASE_URL}/auth/v1"
 REST_BASE = f"{SUPABASE_URL}/rest/v1"
 
+
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
 
 # =========================
 # REST HELPERS
@@ -164,26 +163,31 @@ def rest_headers(access_token: str = "") -> Dict[str, str]:
         h["Authorization"] = f"Bearer {access_token}"
     return h
 
+
 def rest_get(table: str, access_token: str, params: Dict[str, str]) -> requests.Response:
     url = f"{REST_BASE}/{table}"
     return requests.get(url, headers=rest_headers(access_token), params=params, timeout=30)
+
 
 def rest_post(table: str, access_token: str, payload: Any) -> requests.Response:
     url = f"{REST_BASE}/{table}"
     h = rest_headers(access_token)
     h["Prefer"] = "return=representation"
-    return requests.post(url, headers=h, data=json.dumps(payload), timeout=30)
+    return requests.post(url, headers=h, json=payload, timeout=30)
+
 
 def rest_patch(table: str, access_token: str, match_params: Dict[str, str], payload: Any) -> requests.Response:
     url = f"{REST_BASE}/{table}"
     h = rest_headers(access_token)
     h["Prefer"] = "return=representation"
-    return requests.patch(url, headers=h, params=match_params, data=json.dumps(payload), timeout=30)
+    return requests.patch(url, headers=h, params=match_params, json=payload, timeout=30)
+
 
 def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     return df
+
 
 def df_select(table: str, params: Dict[str, str]) -> pd.DataFrame:
     tok = st.session_state["access_token"]
@@ -192,6 +196,7 @@ def df_select(table: str, params: Dict[str, str]) -> pd.DataFrame:
         raise RuntimeError(f"{table} load failed: {r.status_code} {r.text}")
     return _clean_df(pd.DataFrame(r.json() or []))
 
+
 def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     tok = st.session_state["access_token"]
     r = rest_post(table, tok, payload)
@@ -199,6 +204,7 @@ def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise RuntimeError(f"{table} insert failed: {r.status_code} {r.text}")
     rows = r.json()
     return rows[0] if isinstance(rows, list) and rows else (rows or {})
+
 
 def safe_select_with_order(table: str, base_params: Dict[str, str], order_candidates) -> pd.DataFrame:
     last_err = None
@@ -213,18 +219,20 @@ def safe_select_with_order(table: str, base_params: Dict[str, str], order_candid
         raise last_err
     return df_select(table, base_params)
 
+
 # =========================
-# AUTH
+# AUTH (CLEAN + RELIABLE)
 # =========================
 def auth_sign_in(email: str, password: str) -> Dict[str, Any]:
     url = f"{AUTH_BASE}/token"
     params = {"grant_type": "password"}
     payload = {"email": email, "password": password}
     h = {"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"}
-    r = requests.post(url, headers=h, params=params, data=json.dumps(payload), timeout=30)
+    r = requests.post(url, headers=h, params=params, json=payload, timeout=30)
     if r.status_code != 200:
         raise RuntimeError(f"Login failed: {r.status_code} {r.text}")
     return r.json()
+
 
 # =========================
 # SESSION
@@ -236,16 +244,20 @@ def ss_init():
     st.session_state.setdefault("facility_name", "")
     st.session_state.setdefault("role", "standard")
 
+
 ss_init()
+
 
 def is_logged_in() -> bool:
     return bool(st.session_state.get("access_token")) and bool(st.session_state.get("user_id"))
+
 
 def logout():
     for k in list(st.session_state.keys()):
         del st.session_state[k]
     ss_init()
     st.rerun()
+
 
 def load_profile() -> Dict[str, Any]:
     tok = st.session_state["access_token"]
@@ -255,6 +267,7 @@ def load_profile() -> Dict[str, Any]:
     rows = r.json()
     return rows[0] if rows else {}
 
+
 def load_facility_name() -> str:
     tok = st.session_state["access_token"]
     r = rest_get("facilities", tok, params={"select": "facility_name", "limit": "1"})
@@ -263,29 +276,16 @@ def load_facility_name() -> str:
     rows = r.json()
     return str(rows[0].get("facility_name")) if rows else ""
 
-# =========================
-# KPI HELPERS (best-effort, never crash)
-# =========================
-def _safe_len(table: str) -> int:
-    try:
-        df = df_select(table, {"select": "*", "limit": "1"})
-        # PostgREST doesn't return total count unless asked; use quick scan with bigger limit
-        df2 = df_select(table, {"select": "*", "limit": "50000"})
-        return int(len(df2))
-    except Exception:
-        return 0
 
+# =========================
+# KPI HELPERS (best-effort)
+# =========================
 def _who_latest_metrics() -> Dict[str, Any]:
-    """
-    Pull KPIs from v_who_indicators_monthly if available.
-    Works for both organizer and facility user.
-    """
     try:
         dfw = df_select("v_who_indicators_monthly", {"select": "*", "limit": "50000"})
         if dfw.empty or "month" not in dfw.columns:
             return {}
         if "facility_id" in dfw.columns and st.session_state.get("role") != "organizer":
-            # facility-only
             facid = str(st.session_state.get("profile", {}).get("facility_id"))
             dfw = dfw[dfw["facility_id"].astype(str) == facid]
         dfw["month"] = pd.to_datetime(dfw["month"], errors="coerce")
@@ -301,8 +301,8 @@ def _who_latest_metrics() -> Dict[str, Any]:
     except Exception:
         return {}
 
+
 def render_topbar():
-    prof = st.session_state.get("profile") or {}
     fac_name = st.session_state.get("facility_name") or "—"
     role = st.session_state.get("role") or "standard"
 
@@ -311,15 +311,9 @@ def render_topbar():
     if k.get("month") is not None and pd.notna(k.get("month")):
         month_str = pd.to_datetime(k["month"]).strftime("%Y-%m")
 
-    presumptive = k.get("presumptive", 0)
-    confirmed = k.get("confirmed", 0)
-    genx_pos = k.get("genx_pos", 0)
-
-    # fallback if WHO view not ready
-    if not k:
-        presumptive = 0
-        confirmed = 0
-        genx_pos = 0
+    presumptive = k.get("presumptive", 0) if k else 0
+    confirmed = k.get("confirmed", 0) if k else 0
+    genx_pos = k.get("genx_pos", 0) if k else 0
 
     st.markdown(
         f"""
@@ -347,6 +341,7 @@ def render_topbar():
         unsafe_allow_html=True,
     )
 
+
 # =========================
 # SIDEBAR
 # =========================
@@ -359,6 +354,7 @@ with st.sidebar:
         if st.button("Logout"):
             logout()
     st.divider()
+
 
 # =========================
 # LOGIN
@@ -386,6 +382,7 @@ if not is_logged_in():
         st.rerun()
     st.stop()
 
+
 # =========================
 # CONTEXT
 # =========================
@@ -394,6 +391,7 @@ facility_id = profile.get("facility_id")
 if not facility_id:
     st.error("staff_profiles.facility_id missing. Fix in Supabase.")
     st.stop()
+
 
 # =========================
 # COMMON HELPERS
@@ -411,14 +409,17 @@ def patient_picker() -> Optional[str]:
     chosen = st.selectbox("Select patient", labels)
     return chosen.split(" — ")[0].strip()
 
+
 def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
     return df
 
+
 def parse_bool_detected(v: Any) -> bool:
     s = str(v).strip().lower()
     return ("detected" in s) and ("not" not in s)
+
 
 def classify_resistance(rr: bool, inh: bool, fq: bool, bdq: bool, lzd: bool) -> str:
     if not any([rr, inh, fq, bdq, lzd]):
@@ -433,6 +434,7 @@ def classify_resistance(rr: bool, inh: bool, fq: bool, bdq: bool, lzd: bool) -> 
         return "RR-TB"
     return "Drug-sensitive"
 
+
 # =========================
 # PAGES
 # =========================
@@ -442,6 +444,7 @@ def page_home():
     st.success("✅ Authenticated. RLS isolates data per facility. WHO Dashboard + GIS + Alerts enabled.")
     st.write("Facility ID:", facility_id)
     st.write("Role:", st.session_state.get("role"))
+
 
 def page_patients():
     render_topbar()
@@ -472,6 +475,7 @@ def page_patients():
 
     dfp = safe_select_with_order("patients", {"select": "*", "limit": "5000"}, ["created_at.desc", "updated_at.desc", "patient_id.desc"])
     st.dataframe(dfp, use_container_width=True, hide_index=True)
+
 
 def page_diagnosis_events():
     render_topbar()
@@ -505,7 +509,7 @@ def page_diagnosis_events():
         rf_diabetes = st.checkbox("Diabetes (risk)")
         rf_malnutrition = st.checkbox("Malnutrition / underweight (risk)")
 
-    # ✅ Comorbidities / risk factors (these are the ones you asked for)
+    # ✅ Comorbidities / risk factors
     st.markdown("### Comorbidities / Risk Factors")
     col3, col4 = st.columns(2)
 
@@ -522,7 +526,66 @@ def page_diagnosis_events():
         comorbid_cancer = st.checkbox("Cancer")
         comorbid_immunosuppressed = st.checkbox("Immunosuppressed (steroids/transplant)")
 
-    # ✅ Save
+    # ✅ Decision support
+    score = 0
+    score += 3 if sx_cough_2w else 0
+    score += 1 if sx_fever else 0
+    score += 1 if sx_night_sweats else 0
+    score += 1 if sx_weight_loss else 0
+    score += 3 if sx_hemoptysis else 0
+    score += 1 if sx_chest_pain else 0
+
+    score += 2 if rf_contact_tb else 0
+    score += 1 if rf_prev_tb else 0
+    score += 1 if rf_diabetes else 0
+    score += 1 if rf_malnutrition else 0
+
+    score += 2 if comorbid_hiv else 0
+    score += 1 if comorbid_diabetes else 0
+    score += 1 if comorbid_malnutrition else 0
+    score += 1 if comorbid_ckd else 0
+    score += 1 if comorbid_copd else 0
+    score += 1 if comorbid_immunosuppressed else 0
+    score += 1 if comorbid_cancer else 0
+
+    triad = int(sx_fever) + int(sx_night_sweats) + int(sx_weight_loss)
+    presumptive = (
+        sx_hemoptysis
+        or sx_cough_2w
+        or (triad >= 2)
+        or (rf_contact_tb and (sx_fever or sx_night_sweats or sx_weight_loss or sx_chest_pain))
+    )
+
+    if presumptive or score >= 6:
+        screening_band = "HIGH (Presumptive TB)"
+        recommendation = (
+            "Order GeneXpert ASAP; collect sputum sample. "
+            "Apply infection prevention (mask/ventilation). "
+            "Urgent clinician review if severe symptoms/hemoptysis. "
+            "Notify TB focal person."
+        )
+    elif score >= 3:
+        screening_band = "MODERATE"
+        recommendation = (
+            "Do smear microscopy and/or CXR if available; review within 48–72 hours. "
+            "Escalate to GeneXpert if symptoms persist/worsen."
+        )
+    else:
+        screening_band = "LOW"
+        recommendation = (
+            "Provide TB education. No urgent test required today. "
+            "Re-screen if cough persists or new symptoms develop."
+        )
+
+    if genexpert == "Positive":
+        screening_band = "CONFIRMED TB"
+        recommendation = "Start TB care pathway per guideline; notify TB program; consider DST if indicated."
+
+    st.info(
+        f"**Screening score:** {int(score)}  |  **Risk band:** {screening_band}\n\n"
+        f"**Next step:** {recommendation}"
+    )
+
     if st.button("Save event", type="primary"):
         payload = {
             "facility_id": facility_id,
@@ -534,7 +597,6 @@ def page_diagnosis_events():
             "cxr": cxr,
             "notes": notes.strip(),
             "timestamp": now_iso(),
-
             # Symptoms
             "sx_cough_2w": sx_cough_2w,
             "sx_fever": sx_fever,
@@ -542,13 +604,11 @@ def page_diagnosis_events():
             "sx_weight_loss": sx_weight_loss,
             "sx_hemoptysis": sx_hemoptysis,
             "sx_chest_pain": sx_chest_pain,
-
-            # Risks (screening)
+            # Risks
             "rf_contact_tb": rf_contact_tb,
             "rf_prev_tb": rf_prev_tb,
             "rf_diabetes": rf_diabetes,
             "rf_malnutrition": rf_malnutrition,
-
             # Comorbidities
             "comorbid_hiv": comorbid_hiv,
             "comorbid_diabetes": comorbid_diabetes,
@@ -559,6 +619,10 @@ def page_diagnosis_events():
             "comorbid_copd": comorbid_copd,
             "comorbid_cancer": comorbid_cancer,
             "comorbid_immunosuppressed": comorbid_immunosuppressed,
+            # Decision outputs
+            "screening_score": int(score),
+            "screening_band": screening_band,
+            "recommendation": recommendation,
         }
 
         insert_row("events", payload)
@@ -567,6 +631,7 @@ def page_diagnosis_events():
 
     dfe = safe_select_with_order("events", {"select": "*", "limit": "5000"}, ["timestamp.desc", "created_at.desc", "event_id.desc"])
     st.dataframe(dfe, use_container_width=True, hide_index=True)
+
 
 def page_dots():
     render_topbar()
@@ -595,7 +660,12 @@ def page_dots():
         else:
             if "duplicate key" in r.text.lower() or r.status_code == 409:
                 match = {"facility_id": f"eq.{facility_id}", "patient_id": f"eq.{pid}", "date": f"eq.{date.isoformat()}"}
-                rp = rest_patch("dots_daily", st.session_state["access_token"], match, {"dose_taken": bool(dose_taken), "note": note.strip(), "updated_at": now_iso()})
+                rp = rest_patch(
+                    "dots_daily",
+                    st.session_state["access_token"],
+                    match,
+                    {"dose_taken": bool(dose_taken), "note": note.strip(), "updated_at": now_iso()},
+                )
                 if rp.status_code in (200, 204):
                     st.success("Updated ✅")
                     st.rerun()
@@ -606,6 +676,7 @@ def page_dots():
 
     dfd = safe_select_with_order("dots_daily", {"select": "*", "limit": "5000"}, ["date.desc"])
     st.dataframe(dfd, use_container_width=True, hide_index=True)
+
 
 def page_adherence():
     render_topbar()
@@ -649,6 +720,7 @@ def page_adherence():
     dfa = safe_select_with_order("adherence", {"select": "*", "limit": "5000"}, ["timestamp.desc", "created_at.desc", "created_by.desc"])
     st.dataframe(dfa, use_container_width=True, hide_index=True)
 
+
 def page_treatment():
     render_topbar()
     section("Treatment")
@@ -680,6 +752,7 @@ def page_treatment():
     dft = safe_select_with_order("tb_treatment", {"select": "*", "limit": "5000"}, ["updated_at.desc", "created_at.desc"])
     st.dataframe(dft, use_container_width=True, hide_index=True)
 
+
 def page_contact_tracing():
     render_topbar()
     section("Contact Tracing (WHO)")
@@ -689,7 +762,11 @@ def page_contact_tracing():
     if not pid:
         st.stop()
 
-    dfc = safe_select_with_order("tb_contacts", {"select": "*", "index_patient_id": f"eq.{pid}", "limit": "5000"}, ["created_at.desc", "updated_at.desc"])
+    dfc = safe_select_with_order(
+        "tb_contacts",
+        {"select": "*", "index_patient_id": f"eq.{pid}", "limit": "5000"},
+        ["created_at.desc", "updated_at.desc"],
+    )
 
     with st.expander("➕ Add new contact", expanded=True):
         c1, c2, c3 = st.columns(3)
@@ -742,6 +819,7 @@ def page_contact_tracing():
     st.subheader("Contacts")
     st.dataframe(dfc, use_container_width=True, hide_index=True)
 
+
 def page_drug_resistance():
     render_topbar()
     section("Drug Resistance (RR/MDR/XDR)")
@@ -782,8 +860,13 @@ def page_drug_resistance():
         st.success("Saved ✅")
         st.rerun()
 
-    dfr = safe_select_with_order("tb_drug_resistance", {"select": "*", "patient_id": f"eq.{pid}", "limit": "5000"}, ["created_at.desc", "updated_at.desc"])
+    dfr = safe_select_with_order(
+        "tb_drug_resistance",
+        {"select": "*", "patient_id": f"eq.{pid}", "limit": "5000"},
+        ["created_at.desc", "updated_at.desc"],
+    )
     st.dataframe(dfr, use_container_width=True, hide_index=True)
+
 
 def page_genexpert_import():
     render_topbar()
@@ -829,45 +912,57 @@ def page_genexpert_import():
                 if not q.empty:
                     pid = str(q.iloc[0]["patient_id"])
                 else:
-                    outp = insert_row("patients", {
-                        "facility_id": facility_id,
-                        "full_name": full_name,
-                        "age": int(age),
-                        "sex": sex,
-                        "phone": "",
-                        "address": "",
-                        "created_at": now_iso(),
-                    })
+                    outp = insert_row(
+                        "patients",
+                        {
+                            "facility_id": facility_id,
+                            "full_name": full_name,
+                            "age": int(age),
+                            "sex": sex,
+                            "phone": "",
+                            "address": "",
+                            "created_at": now_iso(),
+                        },
+                    )
                     pid = str(outp.get("patient_id"))
 
                 category = "CONFIRMED TB" if mtb_detected else "LOW"
                 genx = "Positive" if mtb_detected else "Negative"
-                insert_row("events", {
-                    "facility_id": facility_id,
-                    "patient_id": pid,
-                    "tb_probability": 0.95 if mtb_detected else 0.10,
-                    "category": category,
-                    "genexpert": genx,
-                    "smear": "Not done",
-                    "cxr": "Not done",
-                    "notes": f"GeneXpert Import | MTB={row.get(col_mtb)} | RIF={row.get(col_rif)} | {notes}".strip(),
-                    "timestamp": now_iso(),
-                })
-
-                if rif_detected:
-                    insert_row("tb_drug_resistance", {
+                insert_row(
+                    "events",
+                    {
                         "facility_id": facility_id,
                         "patient_id": pid,
-                        "rifampicin_resistant": True,
-                        "isoniazid_resistant": False,
-                        "fluoroquinolone_resistant": False,
-                        "bedaquiline_resistant": False,
-                        "linezolid_resistant": False,
-                        "resistance_class": "RR-TB",
-                        "test_method": "GeneXpert",
-                        "notes": "Auto-created from GeneXpert import",
-                        "created_at": now_iso(),
-                    })
+                        "tb_probability": 0.95 if mtb_detected else 0.10,
+                        "category": category,
+                        "genexpert": genx,
+                        "smear": "Not done",
+                        "cxr": "Not done",
+                        "notes": f"GeneXpert Import | MTB={row.get(col_mtb)} | RIF={row.get(col_rif)} | {notes}".strip(),
+                        "timestamp": now_iso(),
+                        "screening_score": 0,
+                        "screening_band": "CONFIRMED TB" if mtb_detected else "LOW",
+                        "recommendation": "Imported from GeneXpert CSV",
+                    },
+                )
+
+                if rif_detected:
+                    insert_row(
+                        "tb_drug_resistance",
+                        {
+                            "facility_id": facility_id,
+                            "patient_id": pid,
+                            "rifampicin_resistant": True,
+                            "isoniazid_resistant": False,
+                            "fluoroquinolone_resistant": False,
+                            "bedaquiline_resistant": False,
+                            "linezolid_resistant": False,
+                            "resistance_class": "RR-TB",
+                            "test_method": "GeneXpert",
+                            "notes": "Auto-created from GeneXpert import",
+                            "created_at": now_iso(),
+                        },
+                    )
 
                 ok += 1
             except Exception:
@@ -875,6 +970,7 @@ def page_genexpert_import():
 
         st.success(f"Import complete ✅ Success={ok} Failed={fail}")
         st.rerun()
+
 
 def page_who_dashboard():
     render_topbar()
@@ -890,7 +986,7 @@ def page_who_dashboard():
         st.error(f"v_who_indicators_monthly returned no facility_id. Columns seen: {list(dfw.columns)}")
         st.stop()
 
-    is_org = (st.session_state.get("role") == "organizer")
+    is_org = st.session_state.get("role") == "organizer"
     if not is_org:
         dfw = dfw[dfw["facility_id"].astype(str) == str(facility_id)]
 
@@ -909,13 +1005,14 @@ def page_who_dashboard():
     trend = dfw.groupby("month")[trend_cols].sum().reset_index()
     st.line_chart(trend.set_index("month"))
 
+
 def page_gis_heatmap():
     render_topbar()
     section("GIS Heatmap (Nigeria)")
     st.caption("Uses v_outbreak_facility view. Add latitude/longitude to facilities for mapping.")
 
     if px is None:
-        st.error("Plotly not installed. Add 'plotly' to requirements.txt then: pip install -r requirements.txt")
+        st.error("Plotly not installed. Add 'plotly' to requirements.txt then redeploy.")
         return
 
     dfm = df_select("v_outbreak_facility", {"select": "*", "limit": "50000"})
@@ -923,7 +1020,7 @@ def page_gis_heatmap():
         st.info("No facilities/events yet.")
         return
 
-    is_org = (st.session_state.get("role") == "organizer")
+    is_org = st.session_state.get("role") == "organizer"
     if (not is_org) and ("facility_id" in dfm.columns):
         dfm = dfm[dfm["facility_id"].astype(str) == str(facility_id)]
 
@@ -957,11 +1054,13 @@ def page_gis_heatmap():
     if dff.empty:
         st.warning("No facilities with coordinates match your filters.")
         st.markdown("Quick fix SQL (paste in Supabase SQL Editor):")
-        st.code(f"""
+        st.code(
+            f"""
 update public.facilities
 set state='Rivers', lga='Port Harcourt', latitude=4.8156, longitude=7.0498
 where facility_id='{facility_id}';
-""")
+"""
+        )
         return
 
     fig = px.density_mapbox(
@@ -977,6 +1076,7 @@ where facility_id='{facility_id}';
     )
     fig.update_layout(mapbox_style="open-street-map", margin={"l": 0, "r": 0, "t": 0, "b": 0})
     st.plotly_chart(fig, use_container_width=True)
+
 
 def page_outbreak_alerts():
     render_topbar()
@@ -1001,6 +1101,7 @@ def page_outbreak_alerts():
     st.subheader("Hotspot ranking (last 7 days)")
     st.dataframe(dfh[show_cols].sort_values("confirmed_7d", ascending=False), use_container_width=True, hide_index=True)
 
+
 def page_exports():
     render_topbar()
     section("Exports")
@@ -1012,6 +1113,7 @@ def page_exports():
             cols[i % 4].download_button(f"{t}.csv", df.to_csv(index=False).encode("utf-8"), f"{t}.csv", "text/csv")
         except Exception:
             cols[i % 4].caption(f"{t} not ready")
+
 
 def page_national_view():
     render_topbar()
@@ -1026,6 +1128,7 @@ def page_national_view():
     st.dataframe(df_fac, use_container_width=True, hide_index=True)
     st.subheader("Events")
     st.dataframe(df_evt, use_container_width=True, hide_index=True)
+
 
 # =========================
 # MENU + ROUTER
