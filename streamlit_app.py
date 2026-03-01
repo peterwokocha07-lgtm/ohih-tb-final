@@ -487,7 +487,7 @@ def page_diagnosis_events():
     cxr = st.selectbox("CXR", ["Not done", "Suggestive", "Not suggestive"])
     notes = st.text_area("Notes")
 
-    # ✅ Screening UI must be INSIDE the function (proper indentation)
+    # ✅ Screening symptoms
     st.markdown("### TB Screening Symptoms")
     col1, col2 = st.columns(2)
 
@@ -502,10 +502,27 @@ def page_diagnosis_events():
         sx_chest_pain = st.checkbox("Chest pain / breathlessness")
         rf_contact_tb = st.checkbox("Contact with TB case")
         rf_prev_tb = st.checkbox("Previous TB treatment")
-        rf_diabetes = st.checkbox("Diabetes")
-        rf_malnutrition = st.checkbox("Malnutrition / underweight")
+        rf_diabetes = st.checkbox("Diabetes (risk)")
+        rf_malnutrition = st.checkbox("Malnutrition / underweight (risk)")
 
-    # Keep Save button OUTSIDE the columns so it shows normally
+    # ✅ Comorbidities / risk factors (these are the ones you asked for)
+    st.markdown("### Comorbidities / Risk Factors")
+    col3, col4 = st.columns(2)
+
+    with col3:
+        comorbid_hiv = st.checkbox("HIV positive")
+        comorbid_diabetes = st.checkbox("Diabetes (comorbidity)")
+        comorbid_malnutrition = st.checkbox("Malnutrition")
+        comorbid_smoking = st.checkbox("Smoking")
+
+    with col4:
+        comorbid_alcohol = st.checkbox("Alcohol use")
+        comorbid_ckd = st.checkbox("Chronic kidney disease (CKD)")
+        comorbid_copd = st.checkbox("COPD / chronic lung disease")
+        comorbid_cancer = st.checkbox("Cancer")
+        comorbid_immunosuppressed = st.checkbox("Immunosuppressed (steroids/transplant)")
+
+    # ✅ Save
     if st.button("Save event", type="primary"):
         payload = {
             "facility_id": facility_id,
@@ -518,17 +535,30 @@ def page_diagnosis_events():
             "notes": notes.strip(),
             "timestamp": now_iso(),
 
-            # ✅ include screening fields (even before DB columns, UI will show)
+            # Symptoms
             "sx_cough_2w": sx_cough_2w,
             "sx_fever": sx_fever,
             "sx_night_sweats": sx_night_sweats,
             "sx_weight_loss": sx_weight_loss,
             "sx_hemoptysis": sx_hemoptysis,
             "sx_chest_pain": sx_chest_pain,
+
+            # Risks (screening)
             "rf_contact_tb": rf_contact_tb,
             "rf_prev_tb": rf_prev_tb,
             "rf_diabetes": rf_diabetes,
             "rf_malnutrition": rf_malnutrition,
+
+            # Comorbidities
+            "comorbid_hiv": comorbid_hiv,
+            "comorbid_diabetes": comorbid_diabetes,
+            "comorbid_malnutrition": comorbid_malnutrition,
+            "comorbid_smoking": comorbid_smoking,
+            "comorbid_alcohol": comorbid_alcohol,
+            "comorbid_ckd": comorbid_ckd,
+            "comorbid_copd": comorbid_copd,
+            "comorbid_cancer": comorbid_cancer,
+            "comorbid_immunosuppressed": comorbid_immunosuppressed,
         }
 
         insert_row("events", payload)
