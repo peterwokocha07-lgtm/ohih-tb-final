@@ -241,21 +241,31 @@ def logout():
     ss_init()
     st.rerun()
 
-def load_profile() -> Dict[str, Any]:
+def load_profile_for_user(user_id: str) -> Dict[str, Any]:
+    """
+    Loads the staff profile for the logged-in auth user.
+    IMPORTANT: must filter by user_id, otherwise you'll randomly get Facility A/B demo.
+    """
     tok = st.session_state["access_token"]
-    r = rest_get("staff_profiles", tok, params={"select": "*", "limit": "1"})
+    params = {
+        "select": "*",
+        "user_id": f"eq.{user_id}",
+        "limit": "1",
+    }
+    r = rest_get("staff_profiles", tok, params=params)
     if r.status_code != 200:
         raise RuntimeError(f"Profile load failed: {r.status_code} {r.text}")
-    rows = r.json()
+    rows = r.json() or []
     return rows[0] if rows else {}
 
-def load_facility_name() -> str:
+def load_facility(facility_id: str) -> Dict[str, Any]:
     tok = st.session_state["access_token"]
-    r = rest_get("facilities", tok, params={"select": "facility_name", "limit": "1"})
+    params = {"select": "facility_id,facility_name,facility_reg", "facility_id": f"eq.{facility_id}", "limit": "1"}
+    r = rest_get("facilities", tok, params=params)
     if r.status_code != 200:
-        return ""
-    rows = r.json()
-    return str(rows[0].get("facility_name")) if rows else ""
+        return {}
+    rows = r.json() or []
+    return rows[0] if rows else {}
 
 # =========================
 # KPI HELPERS (best-effort)
@@ -347,72 +357,67 @@ if not is_logged_in():
         st.session_state["access_token"] = out["access_token"]
         st.session_state["user_id"] = out["user"]["id"]
 
-        prof = load_profile()
-        if not prof:
-            st.error("No staff profile found for this user. Fix staff_profiles in Supabase.")
-            st.stop()
+        prof = load_profile_for_user(st.session_state["user_id"])
+if not prof:
+    st.error("No staff profile found for this user. Fix staff_profiles in Supabase.")
+    st.stop()
 
-        st.session_state["profile"] = prof
-        st.session_state["role"] = prof.get("role", "standard")
-        st.session_state["facility_name"] = load_facility_name()
-        st.success("Login OK")
-        st.rerun()
+st.session_state["profile"] = prof
+st.session_state["role"] = prof.get("role", "standard")
+
+# Facility label: by profile.facility_id (unless organizer)
+fac_id = prof.get("facility_id")
+if st.session_state["role"] == "organizer":
+    st.session_state["facility_name"] = "National View"
+    st.session_state["facility_reg"] = "ALL"
+else:
+    if not fac_id:
+        st.error("staff_profiles.facility_id missing. Fix in Supabase.")
+        st.stop()
+    fac = load_facility(str(fac_id))
+    st.session_state["facility_name"] = fac.get("facility_name", "") or "—"
+    st.session_state["facility_reg"] = fac.get("facility_reg", "") or ""
+
+st.success("Login OK")
+st.rerun()
     st.stop()
 
 # =========================
-# CONTEXT
+# CONTEXT (stable: always reload profile + facility correctly)
 # =========================
-# --- Always load staff profile from DB (prevents stale Streamlit session) ---
 profile = st.session_state.get("profile") or {}
 
-# If profile missing or incomplete, fetch from Supabase every time
-if not profile or not profile.get("facility_id"):
-    uid = st.session_state.get("user_id")  # this should be the Supabase Auth UID
-    if not uid:
-        st.error("No authenticated user_id in session. Please log out and log in again.")
-        st.stop()
+# Always ensure profile belongs to THIS logged-in user
+uid = st.session_state.get("user_id") or ""
+if not uid:
+    st.error("No authenticated user_id in session. Please log out and log in again.")
+    st.stop()
 
-    r = supabase.table("staff_profiles") \
-        .select("user_id, facility_id, staff_id, full_name, profession, role") \
-        .eq("user_id", uid) \
-        .single() \
-        .execute()
+prof = load_profile_for_user(uid)
+if not prof:
+    st.error("No staff profile found for this user. Fix staff_profiles in Supabase.")
+    st.stop()
 
-    if not r.data:
-        st.error("No staff profile found for this user. Fix staff_profiles in Supabase.")
-        st.stop()
+st.session_state["profile"] = prof
+st.session_state["role"] = prof.get("role", "standard")
 
-    profile = r.data
-    st.session_state["profile"] = profile
-    # keep role in sync with staff profile role
-    st.session_state["role"] = profile.get("role") or st.session_state.get("role")
+facility_id = prof.get("facility_id")
 
-facility_id = profile.get("facility_id")
-
-# Organizer = national scope (no facility restriction)
+# Organizer = national scope
 if st.session_state.get("role") == "organizer":
     st.session_state["facility_name"] = "National View"
     st.session_state["facility_reg"] = "ALL"
     facility_id = None
     st.session_state["facility_id"] = None
 else:
-    # Everyone else must have a facility_id
     if not facility_id:
         st.error("staff_profiles.facility_id missing. Fix in Supabase.")
         st.stop()
 
-    # Refresh facility label each run
-    try:
-        fac = supabase.table("facilities") \
-            .select("facility_name, facility_reg") \
-            .eq("facility_id", facility_id) \
-            .single() \
-            .execute()
-        if fac.data:
-            st.session_state["facility_name"] = fac.data.get("facility_name")
-            st.session_state["facility_reg"] = fac.data.get("facility_reg")
-    except Exception:
-        pass
+    st.session_state["facility_id"] = str(facility_id)
+    fac = load_facility(str(facility_id))
+    st.session_state["facility_name"] = fac.get("facility_name", "") or "—"
+    st.session_state["facility_reg"] = fac.get("facility_reg", "") or ""
 
 def is_organizer() -> bool:
     return st.session_state.get("role") == "organizer"
