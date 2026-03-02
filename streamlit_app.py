@@ -543,7 +543,66 @@ def ai_map_df() -> pd.DataFrame:
             df = df[df["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
 
     return df
+def make_gis_map(dfm: pd.DataFrame, title: str = "GIS Heatmap"):
+    section(title)
 
+    if dfm.empty:
+        st.info("No map data yet.")
+        return
+
+    # ensure coords
+    if ("latitude" not in dfm.columns) or ("longitude" not in dfm.columns):
+        st.warning("Missing latitude/longitude columns.")
+        st.dataframe(dfm, use_container_width=True, hide_index=True)
+        return
+
+    dfm = dfm.copy()
+    dfm["latitude"] = pd.to_numeric(dfm["latitude"], errors="coerce")
+    dfm["longitude"] = pd.to_numeric(dfm["longitude"], errors="coerce")
+    dfm = dfm.dropna(subset=["latitude", "longitude"])
+    if dfm.empty:
+        st.warning("No facilities with coordinates.")
+        return
+
+    # choose intensity column
+    intensity_col = None
+    for c in ["predicted_score", "signal_7d", "confirmed_7d", "events_28d"]:
+        if c in dfm.columns:
+            intensity_col = c
+            break
+
+    if intensity_col is None:
+        intensity_col = "points"
+        dfm[intensity_col] = 1
+
+    # risk band (for easy red/yellow/green legend in table + hover)
+    if "predicted_risk" not in dfm.columns and intensity_col in dfm.columns:
+        v = pd.to_numeric(dfm[intensity_col], errors="coerce").fillna(0)
+        dfm["risk_band"] = pd.cut(v, bins=[-1, 10, 40, 1000000], labels=["LOW", "WATCH", "HOTSPOT"])
+    else:
+        dfm["risk_band"] = dfm.get("predicted_risk", "UNKNOWN")
+
+    if px is None:
+        st.info("Plotly not available — showing table instead. Add plotly to requirements.txt to enable maps.")
+        st.dataframe(dfm, use_container_width=True, hide_index=True)
+        return
+
+    fig = px.density_mapbox(
+        dfm,
+        lat="latitude",
+        lon="longitude",
+        z=intensity_col,
+        radius=28,
+        zoom=4.2,
+        height=560,
+        hover_name="facility_name" if "facility_name" in dfm.columns else None,
+        hover_data={c: True for c in ["state", "lga", "risk_band", intensity_col] if c in dfm.columns},
+    )
+    fig.update_layout(mapbox_style="open-street-map", margin={"l": 0, "r": 0, "t": 0, "b": 0})
+    st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("Show underlying facility map data"):
+        st.dataframe(dfm, use_container_width=True, hide_index=True)
 def render_ai_block(show_map: bool = True):
     """
     Home-page AI block:
