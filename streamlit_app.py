@@ -1346,10 +1346,20 @@ def page_gis_heatmap():
     dfm["confirmed_tb"] = pd.to_numeric(dfm.get("confirmed_tb"), errors="coerce").fillna(0).astype(int)
 
     states = sorted([str(x) for x in dfm.get("state", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        state = st.selectbox("State", ["All"] + states)
 
+col1, col2, col3 = st.columns(3)
+
+# Organizer scope control
+scope_state = st.session_state.get("org_scope_state") if is_organizer() else None
+
+with col1:
+    if scope_state:
+        # Organizer already selected a state in sidebar
+        state = scope_state
+        st.selectbox("State", [state], index=0, disabled=True)
+    else:
+        # Normal behaviour
+        state = st.selectbox("State", ["All"] + states)
     if state != "All" and "state" in dfm.columns:
         lgas = sorted([str(x) for x in dfm[dfm["state"] == state].get("lga", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
     else:
