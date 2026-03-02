@@ -388,22 +388,31 @@ if not profile or not profile.get("facility_id"):
     st.session_state["role"] = profile.get("role") or st.session_state.get("role")
 
 facility_id = profile.get("facility_id")
-if not facility_id:
-    st.error("staff_profiles.facility_id missing. Fix in Supabase.")
-    st.stop()
 
-# Optional: refresh facility label each run (so UI always shows correct name)
-try:
-    fac = supabase.table("facilities") \
-        .select("facility_name, facility_reg") \
-        .eq("facility_id", facility_id) \
-        .single() \
-        .execute()
-    if fac.data:
-        st.session_state["facility_name"] = fac.data.get("facility_name")
-        st.session_state["facility_reg"] = fac.data.get("facility_reg")
-except Exception:
-    pass
+# Organizer = national scope (no facility restriction)
+if st.session_state.get("role") == "organizer":
+    st.session_state["facility_name"] = "National View"
+    st.session_state["facility_reg"] = "ALL"
+    facility_id = None
+    st.session_state["facility_id"] = None
+else:
+    # Everyone else must have a facility_id
+    if not facility_id:
+        st.error("staff_profiles.facility_id missing. Fix in Supabase.")
+        st.stop()
+
+    # Refresh facility label each run
+    try:
+        fac = supabase.table("facilities") \
+            .select("facility_name, facility_reg") \
+            .eq("facility_id", facility_id) \
+            .single() \
+            .execute()
+        if fac.data:
+            st.session_state["facility_name"] = fac.data.get("facility_name")
+            st.session_state["facility_reg"] = fac.data.get("facility_reg")
+    except Exception:
+        pass
 
 def is_organizer() -> bool:
     return st.session_state.get("role") == "organizer"
