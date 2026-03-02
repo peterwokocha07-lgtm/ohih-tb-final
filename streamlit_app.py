@@ -1362,13 +1362,20 @@ with col1:
     else:
         # Normal behaviour
         state = st.selectbox("State", ["All"] + states)
-    if state != "All" and "state" in dfm.columns:
-        lgas = sorted([str(x) for x in dfm[dfm["state"] == state].get("lga", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
+       if state != "All" and "state" in dfm.columns:
+        lgas = sorted([
+            str(x) for x in dfm[dfm["state"] == state].get("lga", pd.Series([])).dropna().unique().tolist()
+            if str(x).strip()
+        ])
     else:
-        lgas = sorted([str(x) for x in dfm.get("lga", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
+        lgas = sorted([
+            str(x) for x in dfm.get("lga", pd.Series([])).dropna().unique().tolist()
+            if str(x).strip()
+        ])
 
     with col2:
         lga = st.selectbox("LGA", ["All"] + lgas)
+
     with col3:
         min_cases = st.number_input("Min confirmed TB", 0, 100000, 0)
 
