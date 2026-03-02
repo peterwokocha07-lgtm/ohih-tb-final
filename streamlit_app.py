@@ -224,6 +224,8 @@ def auth_sign_in(email: str, password: str) -> Dict[str, Any]:
 # SESSION
 # =========================
 def ss_init():
+    st.session_state.setdefault("org_scope", "National")
+    st.session_state.setdefault("org_scope_state", None)  # None = national
     st.session_state.setdefault("access_token", "")
     st.session_state.setdefault("user_id", "")
     st.session_state.setdefault("profile", {})
@@ -265,6 +267,20 @@ def load_facility(facility_id: str) -> Dict[str, Any]:
 # =========================
 # KPI HELPERS (best-effort)
 # =========================
+def org_scope_ui():
+    """
+    Organizer scope selector:
+    - National (no filter)
+    - Rivers / Bayelsa / Delta (filters by state)
+    """
+    if st.session_state.get("role") != "organizer":
+        return
+
+    options = ["National", "Rivers", "Bayelsa", "Delta"]
+    choice = st.sidebar.selectbox("🌍 Organizer Scope", options, index=options.index(st.session_state.get("org_scope", "National")))
+
+    st.session_state["org_scope"] = choice
+    st.session_state["org_scope_state"] = None if choice == "National" else choice
 def _who_latest_metrics() -> Dict[str, Any]:
     try:
         dfw = df_select("v_who_indicators_monthly", {"select": "*", "limit": "50000"})
@@ -334,6 +350,9 @@ with st.sidebar:
         st.write("User:", st.session_state.get("user_id"))
         st.write("Role:", st.session_state.get("role"))
         st.write("Facility:", st.session_state.get("facility_name"))
+
+        org_scope_ui()  # ✅ add here
+
         if st.button("Logout"):
             logout()
     st.divider()
