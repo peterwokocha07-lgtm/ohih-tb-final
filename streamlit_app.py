@@ -1385,34 +1385,34 @@ with col3:
 
 dff = dfm.copy()
 
-if state != "All" and "state" in dff.columns:
-    dff = dff[dff["state"] == state]
+    if state != "All" and "state" in dff.columns:
+        dff = dff[dff["state"] == state]
 
-if lga != "All" and "lga" in dff.columns:
-    dff = dff[dff["lga"] == lga]
+    if lga != "All" and "lga" in dff.columns:
+        dff = dff[dff["lga"] == lga]
 
-dff = dff[dff["confirmed_tb"] >= int(min_cases)]
-dff = dff.dropna(subset=["latitude", "longitude"])
+    dff = dff[dff["confirmed_tb"] >= int(min_cases)]
+    dff = dff.dropna(subset=["latitude", "longitude"])
 
-if dff.empty:
-    st.warning("No facilities with coordinates match your filters.")
-    return
+    if dff.empty:
+        st.warning("No facilities with coordinates match your filters.")
+        return
 
-fig = px.density_mapbox(
-    dff,
-    lat="latitude",
-    lon="longitude",
-    z="confirmed_tb",
-    radius=25,
-    zoom=4.2,
-    height=560,
-    hover_name="facility_name" if "facility_name" in dff.columns else None,
-    hover_data={
-        c: True
-        for c in ["state", "lga", "confirmed_tb", "total_events", "last_event_ts"]
-        if c in dff.columns
-    },
-)
+    fig = px.density_mapbox(
+        dff,
+        lat="latitude",
+        lon="longitude",
+        z="confirmed_tb",
+        radius=25,
+        zoom=4.2,
+        height=560,
+        hover_name="facility_name" if "facility_name" in dff.columns else None,
+        hover_data={
+            c: True
+            for c in ["state", "lga", "confirmed_tb", "total_events", "last_event_ts"]
+            if c in dff.columns
+        },
+    )
 
 fig.update_layout(
     mapbox_style="open-street-map",
