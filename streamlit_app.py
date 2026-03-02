@@ -1336,7 +1336,11 @@ def page_gis_heatmap():
 
     if (not is_organizer()) and ("facility_id" in dfm.columns):
         dfm = dfm[dfm["facility_id"].astype(str) == str(facility_id)]
-
+# Organizer scope (National / Rivers / Bayelsa / Delta)
+    if is_organizer():
+    scope_state = st.session_state.get("org_scope_state")  # None = National
+    if scope_state and ("state" in dfm.columns):
+        dfm = dfm[dfm["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
     dfm["latitude"] = pd.to_numeric(dfm.get("latitude"), errors="coerce")
     dfm["longitude"] = pd.to_numeric(dfm.get("longitude"), errors="coerce")
     dfm["confirmed_tb"] = pd.to_numeric(dfm.get("confirmed_tb"), errors="coerce").fillna(0).astype(int)
