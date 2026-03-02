@@ -284,23 +284,27 @@ def org_scope_ui():
 def _who_latest_metrics() -> Dict[str, Any]:
     try:
         dfw = df_select("v_who_indicators_monthly", {"select": "*", "limit": "50000"})
+
         if dfw.empty or "month" not in dfw.columns:
             return {}
+
         role = st.session_state.get("role")
 
-# Facility users: filter by facility_id
-if ("facility_id" in dfw.columns) and (role != "organizer"):
-    facid = str(st.session_state.get("profile", {}).get("facility_id"))
-    dfw = dfw[dfw["facility_id"].astype(str) == facid]
+        # Facility users → filter by facility
+        if ("facility_id" in dfw.columns) and (role != "organizer"):
+            facid = str(st.session_state.get("profile", {}).get("facility_id"))
+            dfw = dfw[dfw["facility_id"].astype(str) == facid]
 
-# Organizer: optional filter by state scope
-if role == "organizer":
-    scope_state = st.session_state.get("org_scope_state")  # None = national
-    if scope_state and ("state" in dfw.columns):
-        dfw = dfw[dfw["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
+        # Organizer → optional state scope
+        if role == "organizer":
+            scope_state = st.session_state.get("org_scope_state")
+            if scope_state and ("state" in dfw.columns):
+                dfw = dfw[dfw["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
+
         dfw["month"] = pd.to_datetime(dfw["month"], errors="coerce")
         latest = dfw["month"].max()
         cur = dfw[dfw["month"] == latest].copy()
+
         return {
             "month": latest,
             "presumptive": int(cur.get("presumptive_total", pd.Series([0])).sum()),
@@ -308,6 +312,7 @@ if role == "organizer":
             "genx_pos": int(cur.get("genexpert_positive", pd.Series([0])).sum()),
             "genx_neg": int(cur.get("genexpert_negative", pd.Series([0])).sum()),
         }
+
     except Exception:
         return {}
 
