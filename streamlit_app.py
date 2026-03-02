@@ -357,7 +357,7 @@ if not is_logged_in():
         st.session_state["access_token"] = out["access_token"]
         st.session_state["user_id"] = out["user"]["id"]
 
-        prof = load_profile_for_user(st.session_state["user_id"])
+prof = load_profile_for_user(st.session_state["user_id"])
 if not prof:
     st.error("No staff profile found for this user. Fix staff_profiles in Supabase.")
     st.stop()
