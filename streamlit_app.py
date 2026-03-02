@@ -380,7 +380,7 @@ else:
 
 st.success("Login OK")
 st.rerun()
-    st.stop()
+st.stop()
 
 # =========================
 # CONTEXT (stable: always reload profile + facility correctly)
