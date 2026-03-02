@@ -286,9 +286,18 @@ def _who_latest_metrics() -> Dict[str, Any]:
         dfw = df_select("v_who_indicators_monthly", {"select": "*", "limit": "50000"})
         if dfw.empty or "month" not in dfw.columns:
             return {}
-        if "facility_id" in dfw.columns and st.session_state.get("role") != "organizer":
-            facid = str(st.session_state.get("profile", {}).get("facility_id"))
-            dfw = dfw[dfw["facility_id"].astype(str) == facid]
+        role = st.session_state.get("role")
+
+# Facility users: filter by facility_id
+if ("facility_id" in dfw.columns) and (role != "organizer"):
+    facid = str(st.session_state.get("profile", {}).get("facility_id"))
+    dfw = dfw[dfw["facility_id"].astype(str) == facid]
+
+# Organizer: optional filter by state scope
+if role == "organizer":
+    scope_state = st.session_state.get("org_scope_state")  # None = national
+    if scope_state and ("state" in dfw.columns):
+        dfw = dfw[dfw["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
         dfw["month"] = pd.to_datetime(dfw["month"], errors="coerce")
         latest = dfw["month"].max()
         cur = dfw[dfw["month"] == latest].copy()
