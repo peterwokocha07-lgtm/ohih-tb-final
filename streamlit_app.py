@@ -1362,49 +1362,64 @@ with col1:
     else:
         # Normal behaviour
         state = st.selectbox("State", ["All"] + states)
-       if state != "All" and "state" in dfm.columns:
-        lgas = sorted([
-            str(x) for x in dfm[dfm["state"] == state].get("lga", pd.Series([])).dropna().unique().tolist()
-            if str(x).strip()
-        ])
-    else:
-        lgas = sorted([
-            str(x) for x in dfm.get("lga", pd.Series([])).dropna().unique().tolist()
-            if str(x).strip()
-        ])
 
-    with col2:
-        lga = st.selectbox("LGA", ["All"] + lgas)
+# ---- LGA LIST (must be OUTSIDE col1 block) ----
+if state != "All" and "state" in dfm.columns:
+    lgas = sorted([
+        str(x)
+        for x in dfm[dfm["state"] == state].get("lga", pd.Series([])).dropna().unique().tolist()
+        if str(x).strip()
+    ])
+else:
+    lgas = sorted([
+        str(x)
+        for x in dfm.get("lga", pd.Series([])).dropna().unique().tolist()
+        if str(x).strip()
+    ])
 
-    with col3:
-        min_cases = st.number_input("Min confirmed TB", 0, 100000, 0)
+with col2:
+    lga = st.selectbox("LGA", ["All"] + lgas)
 
-    dff = dfm.copy()
-    if state != "All" and "state" in dff.columns:
-        dff = dff[dff["state"] == state]
-    if lga != "All" and "lga" in dff.columns:
-        dff = dff[dff["lga"] == lga]
-    dff = dff[dff["confirmed_tb"] >= int(min_cases)]
-    dff = dff.dropna(subset=["latitude", "longitude"])
+with col3:
+    min_cases = st.number_input("Min confirmed TB", 0, 100000, 0)
 
-    if dff.empty:
-        st.warning("No facilities with coordinates match your filters.")
-        return
+dff = dfm.copy()
 
-    fig = px.density_mapbox(
-        dff,
-        lat="latitude",
-        lon="longitude",
-        z="confirmed_tb",
-        radius=25,
-        zoom=4.2,
-        height=560,
-        hover_name="facility_name" if "facility_name" in dff.columns else None,
-        hover_data={c: True for c in ["state", "lga", "confirmed_tb", "total_events", "last_event_ts"] if c in dff.columns},
-    )
-    fig.update_layout(mapbox_style="open-street-map", margin={"l": 0, "r": 0, "t": 0, "b": 0})
-    st.plotly_chart(fig, use_container_width=True)
+if state != "All" and "state" in dff.columns:
+    dff = dff[dff["state"] == state]
 
+if lga != "All" and "lga" in dff.columns:
+    dff = dff[dff["lga"] == lga]
+
+dff = dff[dff["confirmed_tb"] >= int(min_cases)]
+dff = dff.dropna(subset=["latitude", "longitude"])
+
+if dff.empty:
+    st.warning("No facilities with coordinates match your filters.")
+    return
+
+fig = px.density_mapbox(
+    dff,
+    lat="latitude",
+    lon="longitude",
+    z="confirmed_tb",
+    radius=25,
+    zoom=4.2,
+    height=560,
+    hover_name="facility_name" if "facility_name" in dff.columns else None,
+    hover_data={
+        c: True
+        for c in ["state", "lga", "confirmed_tb", "total_events", "last_event_ts"]
+        if c in dff.columns
+    },
+)
+
+fig.update_layout(
+    mapbox_style="open-street-map",
+    margin={"l": 0, "r": 0, "t": 0, "b": 0}
+)
+
+st.plotly_chart(fig, use_container_width=True)
 def page_outbreak_alerts():
     render_topbar()
     section("Outbreak Alerts")
