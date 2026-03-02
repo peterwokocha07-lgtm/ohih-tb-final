@@ -1332,22 +1332,25 @@ def page_gis_heatmap():
     if dfm.empty:
         st.info("No facilities/events yet.")
         return
-
     if (not is_organizer()) and ("facility_id" in dfm.columns):
         dfm = dfm[dfm["facility_id"].astype(str) == str(facility_id)]
-# Organizer scope (National / Rivers / Bayelsa / Delta)
+
+    # Organizer scope (National / Rivers / Bayelsa / Delta)
     if is_organizer():
-    scope_state = st.session_state.get("org_scope_state")  # None = National
-    if scope_state and ("state" in dfm.columns):
-        dfm = dfm[dfm["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
+        scope_state = st.session_state.get("org_scope_state")  # None = National
+        if scope_state and ("state" in dfm.columns):
+            dfm = dfm[dfm["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
+
     dfm["latitude"] = pd.to_numeric(dfm.get("latitude"), errors="coerce")
     dfm["longitude"] = pd.to_numeric(dfm.get("longitude"), errors="coerce")
     dfm["confirmed_tb"] = pd.to_numeric(dfm.get("confirmed_tb"), errors="coerce").fillna(0).astype(int)
 
-    states = sorted([str(x) for x in dfm.get("state", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
+    states = sorted([
+        str(x) for x in dfm.get("state", pd.Series([])).dropna().unique().tolist()
+        if str(x).strip()
+    ])
 
-col1, col2, col3 = st.columns(3)
-
+    col1, col2, col3 = st.columns(3)
 # Organizer scope control
 scope_state = st.session_state.get("org_scope_state") if is_organizer() else None
 
