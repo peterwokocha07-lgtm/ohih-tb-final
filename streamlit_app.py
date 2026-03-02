@@ -1,7 +1,7 @@
 import os
 import json
 import datetime as dt
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import pandas as pd
 import requests
@@ -110,6 +110,10 @@ hr{
   border-top: 1px solid rgba(2,6,23,.10);
   margin: 12px 0;
 }
+.small-muted{
+  font-size: 12px;
+  opacity: .82;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -155,6 +159,51 @@ def now_iso() -> str:
 
 
 # =========================
+# SESSION
+# =========================
+def ss_init():
+    st.session_state.setdefault("org_scope", "National")
+    st.session_state.setdefault("org_scope_state", None)  # None = national
+    st.session_state.setdefault("access_token", "")
+    st.session_state.setdefault("user_id", "")
+    st.session_state.setdefault("profile", {})
+    st.session_state.setdefault("facility_name", "")
+    st.session_state.setdefault("facility_reg", "")
+    st.session_state.setdefault("facility_id", None)
+    st.session_state.setdefault("role", "standard")
+
+    # NEW: Offline + Low-bandwidth controls
+    st.session_state.setdefault("offline_mode", False)
+    st.session_state.setdefault("low_bw", False)
+
+    # NEW: Offline queue for writes
+    st.session_state.setdefault("offline_queue", [])  # List[Dict[str,Any]]
+
+
+ss_init()
+
+
+def is_logged_in() -> bool:
+    return bool(st.session_state.get("access_token")) and bool(st.session_state.get("user_id"))
+
+
+def logout():
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    ss_init()
+    st.rerun()
+
+
+def is_organizer() -> bool:
+    return st.session_state.get("role") == "organizer"
+
+
+def effective_limit() -> int:
+    # Low-bandwidth: smaller limits (faster)
+    return 5000 if st.session_state.get("low_bw") else 50000
+
+
+# =========================
 # REST HELPERS
 # =========================
 def rest_headers(access_token: str = "") -> Dict[str, str]:
@@ -176,12 +225,7 @@ def rest_post(table: str, access_token: str, payload: Any) -> requests.Response:
     return requests.post(url, headers=h, json=payload, timeout=30)
 
 
-def rest_patch(
-    table: str,
-    access_token: str,
-    match_params: Dict[str, str],
-    payload: Any,
-) -> requests.Response:
+def rest_patch(table: str, access_token: str, match_params: Dict[str, str], payload: Any) -> requests.Response:
     url = f"{REST_BASE}/{table}"
     h = rest_headers(access_token)
     h["Prefer"] = "return=representation"
@@ -202,13 +246,46 @@ def df_select(table: str, params: Dict[str, str]) -> pd.DataFrame:
     return _clean_df(pd.DataFrame(r.json() or []))
 
 
+def queue_write(table: str, payload: Dict[str, Any], op: str = "insert", match_params: Optional[Dict[str, str]] = None):
+    item = {
+        "queued_at": now_iso(),
+        "op": op,  # "insert" or "patch"
+        "table": table,
+        "payload": payload,
+        "match_params": match_params or {},
+    }
+    st.session_state["offline_queue"].append(item)
+
+
 def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    # NEW: Offline mode queues writes
+    if st.session_state.get("offline_mode"):
+        queue_write(table, payload, op="insert")
+        return {"queued": True, "table": table, "queued_at": now_iso()}
+
     tok = st.session_state["access_token"]
     r = rest_post(table, tok, payload)
     if r.status_code not in (200, 201):
         raise RuntimeError(f"{table} insert failed: {r.status_code} {r.text}")
     rows = r.json()
     return rows[0] if isinstance(rows, list) and rows else (rows or {})
+
+
+def patch_row(table: str, match_params: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, Any]:
+    # NEW: Offline mode queues patches too
+    if st.session_state.get("offline_mode"):
+        queue_write(table, payload, op="patch", match_params=match_params)
+        return {"queued": True, "op": "patch", "table": table, "queued_at": now_iso()}
+
+    tok = st.session_state["access_token"]
+    r = rest_patch(table, tok, match_params, payload)
+    if r.status_code not in (200, 204):
+        raise RuntimeError(f"{table} patch failed: {r.status_code} {r.text}")
+    try:
+        rows = r.json()
+        return rows[0] if isinstance(rows, list) and rows else (rows or {})
+    except Exception:
+        return {"patched": True}
 
 
 def safe_select_with_order(table: str, base_params: Dict[str, str], order_candidates) -> pd.DataFrame:
@@ -239,39 +316,10 @@ def auth_sign_in(email: str, password: str) -> Dict[str, Any]:
     return r.json()
 
 
-# =========================
-# SESSION
-# =========================
-def ss_init():
-    st.session_state.setdefault("org_scope", "National")
-    st.session_state.setdefault("org_scope_state", None)  # None = national
-    st.session_state.setdefault("access_token", "")
-    st.session_state.setdefault("user_id", "")
-    st.session_state.setdefault("profile", {})
-    st.session_state.setdefault("facility_name", "")
-    st.session_state.setdefault("facility_reg", "")
-    st.session_state.setdefault("facility_id", None)
-    st.session_state.setdefault("role", "standard")
-
-
-ss_init()
-
-
-def is_logged_in() -> bool:
-    return bool(st.session_state.get("access_token")) and bool(st.session_state.get("user_id"))
-
-
-def logout():
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
-    ss_init()
-    st.rerun()
-
-
 def load_profile_for_user(user_id: str) -> Dict[str, Any]:
     user_id = (user_id or "").strip()
     if not user_id:
-        return {}  # do not call PostgREST with empty uuid
+        return {}
 
     tok = st.session_state["access_token"]
     params = {"select": "*", "user_id": f"eq.{user_id}", "limit": "1"}
@@ -284,7 +332,7 @@ def load_profile_for_user(user_id: str) -> Dict[str, Any]:
 
 def load_facility(facility_id: str) -> Dict[str, Any]:
     tok = st.session_state["access_token"]
-    params = {"select": "facility_id,facility_name,facility_reg", "facility_id": f"eq.{facility_id}", "limit": "1"}
+    params = {"select": "facility_id,facility_name,facility_reg,state,lga,latitude,longitude", "facility_id": f"eq.{facility_id}", "limit": "1"}
     r = rest_get("facilities", tok, params=params)
     if r.status_code != 200:
         return {}
@@ -292,22 +340,14 @@ def load_facility(facility_id: str) -> Dict[str, Any]:
     return rows[0] if rows else {}
 
 
-def is_organizer() -> bool:
-    return st.session_state.get("role") == "organizer"
-
-
 # =========================
-# KPI HELPERS (best-effort)
+# UI: Organizer scope + Offline/Low-BW
 # =========================
 def org_scope_ui():
-    """
-    Organizer scope selector:
-    - National (no filter)
-    - Rivers / Bayelsa / Delta (filters by state)
-    """
     if st.session_state.get("role") != "organizer":
         return
 
+    # These are just filters; they must exist as facilities.state in your DB/views
     options = ["National", "Rivers", "Bayelsa", "Delta"]
     current = st.session_state.get("org_scope", "National")
     if current not in options:
@@ -318,9 +358,68 @@ def org_scope_ui():
     st.session_state["org_scope_state"] = None if choice == "National" else choice
 
 
+def offline_lowbw_ui():
+    st.sidebar.markdown("### ⚙️ Performance / Offline")
+    st.session_state["low_bw"] = st.sidebar.toggle("Low-bandwidth mode", value=st.session_state.get("low_bw", False))
+    st.session_state["offline_mode"] = st.sidebar.toggle("Offline mode (queue writes)", value=st.session_state.get("offline_mode", False))
+    qn = len(st.session_state.get("offline_queue", []))
+    st.sidebar.caption(f"Queued actions: {qn}")
+
+    with st.sidebar.expander("Offline Queue + Sync"):
+        if qn == 0:
+            st.write("No queued actions.")
+        else:
+            st.write("Queued actions will be sent when you click **Sync now** (or disable offline mode).")
+            if st.button("Sync now", key="sync_now"):
+                sync_offline_queue()
+
+
+def sync_offline_queue():
+    q: List[Dict[str, Any]] = st.session_state.get("offline_queue", [])
+    if not q:
+        st.success("Nothing to sync.")
+        return
+
+    tok = st.session_state["access_token"]
+    ok, fail = 0, 0
+    remaining = []
+    for item in q:
+        try:
+            table = item.get("table")
+            op = item.get("op", "insert")
+            payload = item.get("payload", {})
+            match_params = item.get("match_params", {}) or {}
+
+            if op == "insert":
+                r = rest_post(table, tok, payload)
+                if r.status_code not in (200, 201):
+                    raise RuntimeError(r.text)
+                ok += 1
+            elif op == "patch":
+                r = rest_patch(table, tok, match_params, payload)
+                if r.status_code not in (200, 204):
+                    raise RuntimeError(r.text)
+                ok += 1
+            else:
+                raise RuntimeError(f"Unknown op: {op}")
+
+        except Exception:
+            fail += 1
+            remaining.append(item)
+
+    st.session_state["offline_queue"] = remaining
+    if fail == 0:
+        st.success(f"Sync complete ✅ Sent={ok}, Failed={fail}")
+    else:
+        st.warning(f"Sync complete (partial) ⚠️ Sent={ok}, Failed={fail} (kept in queue)")
+
+
+# =========================
+# KPI HELPERS (best-effort)
+# =========================
 def _who_latest_metrics() -> Dict[str, Any]:
     try:
-        dfw = df_select("v_who_indicators_monthly", {"select": "*", "limit": "50000"})
+        dfw = df_select("v_who_indicators_monthly", {"select": "*", "limit": str(effective_limit())})
         if dfw.empty or "month" not in dfw.columns:
             return {}
 
@@ -377,6 +476,8 @@ def render_topbar():
         <span class="ohih-badge">🛡️ Role: {role}</span>
         <span class="ohih-badge">🔒 RLS: ON</span>
         <span class="ohih-badge">📡 Surveillance: ACTIVE</span>
+        <span class="ohih-badge">📶 Low-BW: {"ON" if st.session_state.get("low_bw") else "OFF"}</span>
+        <span class="ohih-badge">🛰️ Offline: {"ON" if st.session_state.get("offline_mode") else "OFF"}</span>
       </div>
     </div>
     <div class="ohih-kpis">
@@ -402,7 +503,8 @@ with st.sidebar:
         st.write("Role:", st.session_state.get("role"))
         st.write("Facility:", st.session_state.get("facility_name"))
 
-        org_scope_ui()  # organizer scope selector (only shows for organizer)
+        org_scope_ui()
+        offline_lowbw_ui()
 
         if st.button("Logout"):
             logout()
@@ -424,7 +526,6 @@ if not is_logged_in():
         st.session_state["access_token"] = out["access_token"]
         st.session_state["user_id"] = out["user"]["id"]
 
-        # Load correct staff profile for this user
         prof = load_profile_for_user(st.session_state["user_id"])
         if not prof:
             st.error("No staff profile found for this user. Fix staff_profiles in Supabase.")
@@ -433,7 +534,6 @@ if not is_logged_in():
         st.session_state["profile"] = prof
         st.session_state["role"] = prof.get("role", "standard")
 
-        # Facility label (Organizer = national view)
         fac_id = prof.get("facility_id")
         if st.session_state["role"] == "organizer":
             st.session_state["facility_name"] = "National View"
@@ -494,7 +594,7 @@ else:
 def patient_picker() -> Optional[str]:
     dfp = safe_select_with_order(
         "patients",
-        {"select": "patient_id,full_name,created_at", "limit": "5000"},
+        {"select": "patient_id,full_name,created_at", "limit": str(effective_limit())},
         ["created_at.desc", "updated_at.desc", "patient_id.desc"],
     )
     if dfp.empty:
@@ -534,7 +634,7 @@ def classify_resistance(rr: bool, inh: bool, fq: bool, bdq: bool, lzd: bool) -> 
 # AI HELPERS (Views already created in Supabase)
 # =========================
 def ai_prediction_df() -> pd.DataFrame:
-    df = df_select("v_ai_prediction_7d", {"select": "*", "limit": "50000"})
+    df = df_select("v_ai_prediction_7d", {"select": "*", "limit": str(effective_limit())})
     if df.empty:
         return df
 
@@ -550,7 +650,7 @@ def ai_prediction_df() -> pd.DataFrame:
 
 
 def ai_drivers_df() -> pd.DataFrame:
-    df = df_select("v_ai_drivers_facility", {"select": "*", "limit": "50000"})
+    df = df_select("v_ai_drivers_facility", {"select": "*", "limit": str(effective_limit())})
     if df.empty:
         return df
 
@@ -566,7 +666,7 @@ def ai_drivers_df() -> pd.DataFrame:
 
 
 def ai_map_df() -> pd.DataFrame:
-    df = df_select("v_ai_map_overlay", {"select": "*", "limit": "50000"})
+    df = df_select("v_ai_map_overlay", {"select": "*", "limit": str(effective_limit())})
     if df.empty:
         return df
 
@@ -579,65 +679,6 @@ def ai_map_df() -> pd.DataFrame:
             df = df[df["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
 
     return df
-
-
-def make_gis_map(dfm: pd.DataFrame, title: str = "GIS Heatmap"):
-    section(title)
-
-    if dfm.empty:
-        st.info("No map data yet.")
-        return
-
-    if ("latitude" not in dfm.columns) or ("longitude" not in dfm.columns):
-        st.warning("Missing latitude/longitude columns.")
-        st.dataframe(dfm, use_container_width=True, hide_index=True)
-        return
-
-    dfm = dfm.copy()
-    dfm["latitude"] = pd.to_numeric(dfm["latitude"], errors="coerce")
-    dfm["longitude"] = pd.to_numeric(dfm["longitude"], errors="coerce")
-    dfm = dfm.dropna(subset=["latitude", "longitude"])
-    if dfm.empty:
-        st.warning("No facilities with coordinates.")
-        return
-
-    intensity_col = None
-    for c in ["predicted_score", "signal_7d", "confirmed_7d", "events_28d"]:
-        if c in dfm.columns:
-            intensity_col = c
-            break
-
-    if intensity_col is None:
-        intensity_col = "points"
-        dfm[intensity_col] = 1
-
-    if "predicted_risk" not in dfm.columns and intensity_col in dfm.columns:
-        v = pd.to_numeric(dfm[intensity_col], errors="coerce").fillna(0)
-        dfm["risk_band"] = pd.cut(v, bins=[-1, 10, 40, 1000000], labels=["LOW", "WATCH", "HOTSPOT"])
-    else:
-        dfm["risk_band"] = dfm.get("predicted_risk", "UNKNOWN")
-
-    if px is None:
-        st.info("Plotly not available — showing table instead. Add plotly to requirements.txt to enable maps.")
-        st.dataframe(dfm, use_container_width=True, hide_index=True)
-        return
-
-    fig = px.density_mapbox(
-        dfm,
-        lat="latitude",
-        lon="longitude",
-        z=intensity_col,
-        radius=28,
-        zoom=4.2,
-        height=560,
-        hover_name="facility_name" if "facility_name" in dfm.columns else None,
-        hover_data={c: True for c in ["state", "lga", "risk_band", intensity_col] if c in dfm.columns},
-    )
-    fig.update_layout(mapbox_style="open-street-map", margin={"l": 0, "r": 0, "t": 0, "b": 0})
-    st.plotly_chart(fig, use_container_width=True)
-
-    with st.expander("Show underlying facility map data"):
-        st.dataframe(dfm, use_container_width=True, hide_index=True)
 
 
 def render_ai_block(show_map: bool = True):
@@ -709,9 +750,7 @@ def render_ai_block(show_map: bool = True):
                 except Exception:
                     drivers.append((label, 0))
 
-        df_dr = pd.DataFrame(drivers, columns=["Driver", "Count (last 28d)"]).sort_values(
-            "Count (last 28d)", ascending=False
-        )
+        df_dr = pd.DataFrame(drivers, columns=["Driver", "Count (last 28d)"]).sort_values("Count (last 28d)", ascending=False)
         top5 = df_dr.head(5)
         if top5["Count (last 28d)"].sum() == 0:
             st.info("Drivers are available, but counts are still 0. Record symptoms/risk factors in Diagnosis Events.")
@@ -724,8 +763,19 @@ def render_ai_block(show_map: bool = True):
         return
 
     st.markdown("### 🗺️ AI Map Overlay")
+
+    # Low-BW: no maps
+    if st.session_state.get("low_bw"):
+        st.info("Low-bandwidth mode: map disabled. Turn it off in sidebar to view map.")
+        try:
+            dfm = ai_map_df()
+            st.dataframe(dfm.head(500), use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.exception(e)
+        return
+
     if px is None:
-        st.info("Plotly is not available, so map overlay will show as a table. Add plotly to requirements.txt to enable maps.")
+        st.info("Plotly not available, so map overlay will show as a table. Add plotly to requirements.txt to enable maps.")
         try:
             dfm = ai_map_df()
             st.dataframe(dfm, use_container_width=True, hide_index=True)
@@ -765,16 +815,185 @@ def render_ai_block(show_map: bool = True):
         lon="longitude",
         size="predicted_score",
         hover_name="facility_name" if "facility_name" in dfm.columns else None,
-        hover_data={
-            c: True
-            for c in ["state", "lga", "predicted_risk", "predicted_score", "signal_7d", "confirmed_7d"]
-            if c in dfm.columns
-        },
+        hover_data={c: True for c in ["state", "lga", "predicted_risk", "predicted_score", "signal_7d", "confirmed_7d"] if c in dfm.columns},
         zoom=4.2,
         height=520,
     )
     fig.update_layout(mapbox_style="open-street-map", margin={"l": 0, "r": 0, "t": 0, "b": 0})
     st.plotly_chart(fig, use_container_width=True)
+
+
+# ============================================================
+# NEW: AI DRUG RESISTANCE PREDICTOR (rule-based demo)
+# ============================================================
+MUTATION_DRUG_MAP = {
+    # Very common, simplified mapping (DEMO) — you can expand later:
+    "rpoB:S450L": ["RIF"],
+    "rpoB:531": ["RIF"],
+    "katG:S315T": ["INH"],
+    "inhA:-15C>T": ["INH"],
+    "gyrA:D94G": ["FQ"],
+    "gyrA:A90V": ["FQ"],
+    "rrs:A1401G": ["AMK", "KAN", "CAP"],  # injectables
+    "atpE": ["BDQ"],
+    "Rv0678": ["BDQ", "CFZ"],
+    "rplC": ["LZD"],
+    "rrl": ["LZD"],
+}
+
+DRUG_BUCKETS = {
+    "RIF": "First-line core",
+    "INH": "First-line core",
+    "FQ": "Second-line core",
+    "BDQ": "New drugs",
+    "LZD": "New drugs",
+    "CFZ": "Companion drugs",
+    "AMK": "Injectables",
+    "KAN": "Injectables",
+    "CAP": "Injectables",
+}
+
+
+def parse_mutations(text: str) -> List[str]:
+    if not text:
+        return []
+    # allow comma/newline separation
+    raw = [x.strip() for x in text.replace("\n", ",").split(",")]
+    muts = [x for x in raw if x]
+    return muts
+
+
+def predict_resistance_from_mutations(muts: List[str]) -> Dict[str, Any]:
+    resistant_drugs = set()
+    matched = []
+    for m in muts:
+        # direct key match
+        if m in MUTATION_DRUG_MAP:
+            ds = MUTATION_DRUG_MAP[m]
+            resistant_drugs.update(ds)
+            matched.append((m, ", ".join(ds)))
+            continue
+        # loose contains match (e.g., "Rv0678:..." or "atpE:..." or partial)
+        for k, ds in MUTATION_DRUG_MAP.items():
+            if k.lower() in m.lower():
+                resistant_drugs.update(ds)
+                matched.append((m, ", ".join(ds)))
+                break
+
+    rr = "RIF" in resistant_drugs
+    inh = "INH" in resistant_drugs
+    fq = "FQ" in resistant_drugs
+    bdq = "BDQ" in resistant_drugs
+    lzd = "LZD" in resistant_drugs
+
+    resistance_class = classify_resistance(rr, inh, fq, bdq, lzd)
+
+    alert = "LOW"
+    if resistance_class in ("MDR-TB", "Pre-XDR", "XDR-TB", "RR-TB"):
+        alert = "HIGH"
+    if resistance_class in ("Pre-XDR", "XDR-TB"):
+        alert = "CRITICAL"
+
+    return {
+        "resistant_drugs": sorted(list(resistant_drugs)),
+        "matched_rules": matched,
+        "class": resistance_class,
+        "alert": alert,
+    }
+
+
+def page_ai_drug_resistance_predictor():
+    render_topbar()
+    section("AI Drug Resistance Predictor")
+    st.caption("Rule-based demo predictor: enter mutations (from LPA/WGS reports) → predicted resistance + MDR/XDR class.")
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        muts_text = st.text_area(
+            "Mutations (comma or newline separated)",
+            placeholder="e.g.\nrpoB:S450L\nkatG:S315T\ngyrA:D94G\nRv0678:del",
+            height=140,
+        )
+    with c2:
+        st.markdown("**Tips**")
+        st.markdown(
+            "- Works best with keys like `rpoB:S450L`, `katG:S315T`, `gyrA:D94G`, `Rv0678:*`.\n"
+            "- You can extend mapping in code later.\n"
+            "- This page is analytics-only; it does not replace lab DST."
+        )
+
+    muts = parse_mutations(muts_text)
+    if not muts:
+        st.info("Enter at least one mutation to predict resistance.")
+        return
+
+    pred = predict_resistance_from_mutations(muts)
+
+    if pred["alert"] == "CRITICAL":
+        st.error(f"🚨 Predicted Resistance Class: **{pred['class']}** (CRITICAL)")
+    elif pred["alert"] == "HIGH":
+        st.warning(f"⚠️ Predicted Resistance Class: **{pred['class']}** (HIGH)")
+    else:
+        st.success(f"✅ Predicted Resistance Class: **{pred['class']}**")
+
+    rd = pred["resistant_drugs"]
+    if not rd:
+        st.write("Predicted resistant drugs: **None detected by rules**")
+    else:
+        st.write("Predicted resistant drugs:", ", ".join([f"**{d}**" for d in rd]))
+
+        # group by bucket
+        rows = []
+        for d in rd:
+            rows.append({"Drug": d, "Category": DRUG_BUCKETS.get(d, "Other")})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    with st.expander("See matched rule hits"):
+        if pred["matched_rules"]:
+            st.dataframe(pd.DataFrame(pred["matched_rules"], columns=["Input mutation", "Mapped resistant drugs"]),
+                         use_container_width=True, hide_index=True)
+        else:
+            st.write("No direct mapping hit.")
+
+    st.markdown("---")
+    st.subheader("Resistance records (from your DB)")
+
+    # Facility users: facility-only; Organizer: national + optional state scope if facilities has state
+    try:
+        dfr = df_select("tb_drug_resistance", {"select": "*", "limit": str(effective_limit())})
+    except Exception as e:
+        st.error("Could not load tb_drug_resistance table.")
+        st.exception(e)
+        return
+
+    if dfr.empty:
+        st.info("No resistance records yet. Save some in the 'Drug Resistance' page or import GeneXpert with RIF resistance.")
+        return
+
+    if not is_organizer() and "facility_id" in dfr.columns:
+        dfr = dfr[dfr["facility_id"].astype(str) == str(facility_id)]
+
+    # Organizer state scope: merge facilities to get state if possible
+    if is_organizer():
+        scope_state = st.session_state.get("org_scope_state")
+        if scope_state:
+            try:
+                df_fac = df_select("facilities", {"select": "facility_id,state,lga,facility_name", "limit": str(effective_limit())})
+                if not df_fac.empty and "state" in df_fac.columns:
+                    dfr = dfr.merge(df_fac, on="facility_id", how="left")
+                    dfr = dfr[dfr["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
+            except Exception:
+                pass
+
+    show_cols = [c for c in ["patient_id", "resistance_class", "test_method", "created_at", "notes", "facility_id", "facility_name", "state", "lga"] if c in dfr.columns]
+    st.dataframe(dfr[show_cols].sort_values("created_at", ascending=False) if "created_at" in dfr.columns else dfr[show_cols],
+                 use_container_width=True, hide_index=True)
+
+    st.subheader("Summary")
+    if "resistance_class" in dfr.columns:
+        summ = dfr["resistance_class"].fillna("UNKNOWN").value_counts().reset_index()
+        summ.columns = ["Resistance class", "Count"]
+        st.dataframe(summ, use_container_width=True, hide_index=True)
 
 
 # =========================
@@ -789,15 +1008,6 @@ def page_home():
 
     st.markdown("---")
     section("AI Outbreak Prediction")
-    render_ai_block(show_map=True)
-
-
-def page_ai_prediction():
-    render_topbar()
-    section("AI Prediction (Next 7 days)")
-    st.caption(
-        "AI uses TB signal = confirmed + weighted presumptives (weighted by screening_score). It also explains WHY risk is high."
-    )
     render_ai_block(show_map=True)
 
 
@@ -825,10 +1035,13 @@ def page_patients():
                 "created_at": now_iso(),
             }
             out = insert_row("patients", payload)
-            st.success(f"Saved ✅ Patient: {out.get('patient_id')}")
+            if out.get("queued"):
+                st.info("Queued ✅ (Offline mode)")
+            else:
+                st.success(f"Saved ✅ Patient: {out.get('patient_id')}")
             st.rerun()
 
-    dfp = safe_select_with_order("patients", {"select": "*", "limit": "5000"}, ["created_at.desc", "updated_at.desc", "patient_id.desc"])
+    dfp = safe_select_with_order("patients", {"select": "*", "limit": str(effective_limit())}, ["created_at.desc", "updated_at.desc", "patient_id.desc"])
     st.dataframe(dfp, use_container_width=True, hide_index=True)
 
 
@@ -970,11 +1183,14 @@ def page_diagnosis_events():
             "screening_band": screening_band,
             "recommendation": recommendation,
         }
-        insert_row("events", payload)
-        st.success("Saved ✅")
+        out = insert_row("events", payload)
+        if out.get("queued"):
+            st.info("Queued ✅ (Offline mode)")
+        else:
+            st.success("Saved ✅")
         st.rerun()
 
-    dfe = safe_select_with_order("events", {"select": "*", "limit": "5000"}, ["timestamp.desc", "created_at.desc", "event_id.desc"])
+    dfe = safe_select_with_order("events", {"select": "*", "limit": str(effective_limit())}, ["timestamp.desc", "created_at.desc", "event_id.desc"])
     st.dataframe(dfe, use_container_width=True, hide_index=True)
 
 
@@ -998,28 +1214,32 @@ def page_dots():
             "note": note.strip(),
             "created_at": now_iso(),
         }
-        r = rest_post("dots_daily", st.session_state["access_token"], payload)
+
+        # If offline, queue insert; else try insert then patch on duplicate
+        if st.session_state.get("offline_mode"):
+            queue_write("dots_daily", payload, op="insert")
+            st.info("Queued ✅ (Offline mode)")
+            st.rerun()
+
+        tok = st.session_state["access_token"]
+        r = rest_post("dots_daily", tok, payload)
         if r.status_code in (200, 201):
             st.success("Saved ✅")
             st.rerun()
         else:
             if "duplicate key" in r.text.lower() or r.status_code == 409:
                 match = {"facility_id": f"eq.{facility_id}", "patient_id": f"eq.{pid}", "date": f"eq.{date.isoformat()}"}
-                rp = rest_patch(
-                    "dots_daily",
-                    st.session_state["access_token"],
-                    match,
-                    {"dose_taken": bool(dose_taken), "note": note.strip()},
-                )
-                if rp.status_code in (200, 204):
+                try:
+                    patch_row("dots_daily", match, {"dose_taken": bool(dose_taken), "note": note.strip()})
                     st.success("Updated ✅")
                     st.rerun()
-                else:
-                    st.error(f"DOTS save failed: {rp.status_code} {rp.text}")
+                except Exception as e:
+                    st.error("DOTS update failed.")
+                    st.exception(e)
             else:
                 st.error(f"DOTS save failed: {r.status_code} {r.text}")
 
-    dfd = safe_select_with_order("dots_daily", {"select": "*", "limit": "5000"}, ["date.desc"])
+    dfd = safe_select_with_order("dots_daily", {"select": "*", "limit": str(effective_limit())}, ["date.desc"])
     st.dataframe(dfd, use_container_width=True, hide_index=True)
 
 
@@ -1058,11 +1278,14 @@ def page_adherence():
             "notes": notes.strip(),
             "timestamp": now_iso(),
         }
-        insert_row("adherence", payload)
-        st.success("Saved ✅")
+        out = insert_row("adherence", payload)
+        if out.get("queued"):
+            st.info("Queued ✅ (Offline mode)")
+        else:
+            st.success("Saved ✅")
         st.rerun()
 
-    dfa = safe_select_with_order("adherence", {"select": "*", "limit": "5000"}, ["timestamp.desc", "created_at.desc", "created_by.desc"])
+    dfa = safe_select_with_order("adherence", {"select": "*", "limit": str(effective_limit())}, ["timestamp.desc", "created_at.desc", "created_by.desc"])
     st.dataframe(dfa, use_container_width=True, hide_index=True)
 
 
@@ -1090,11 +1313,14 @@ def page_treatment():
             "notes": notes.strip(),
             "updated_at": now_iso(),
         }
-        insert_row("tb_treatment", payload)
-        st.success("Saved ✅")
+        out = insert_row("tb_treatment", payload)
+        if out.get("queued"):
+            st.info("Queued ✅ (Offline mode)")
+        else:
+            st.success("Saved ✅")
         st.rerun()
 
-    dft = safe_select_with_order("tb_treatment", {"select": "*", "limit": "5000"}, ["updated_at.desc", "created_at.desc"])
+    dft = safe_select_with_order("tb_treatment", {"select": "*", "limit": str(effective_limit())}, ["updated_at.desc", "created_at.desc"])
     st.dataframe(dft, use_container_width=True, hide_index=True)
 
 
@@ -1109,7 +1335,7 @@ def page_contact_tracing():
 
     dfc = safe_select_with_order(
         "tb_contacts",
-        {"select": "*", "index_patient_id": f"eq.{pid}", "limit": "5000"},
+        {"select": "*", "index_patient_id": f"eq.{pid}", "limit": str(effective_limit())},
         ["created_at.desc", "updated_at.desc"],
     )
 
@@ -1157,8 +1383,11 @@ def page_contact_tracing():
                 "created_at": now_iso(),
                 "updated_at": now_iso(),
             }
-            insert_row("tb_contacts", payload)
-            st.success("Saved ✅")
+            out = insert_row("tb_contacts", payload)
+            if out.get("queued"):
+                st.info("Queued ✅ (Offline mode)")
+            else:
+                st.success("Saved ✅")
             st.rerun()
 
     st.subheader("Contacts")
@@ -1201,13 +1430,16 @@ def page_drug_resistance():
             "notes": notes.strip(),
             "created_at": now_iso(),
         }
-        insert_row("tb_drug_resistance", payload)
-        st.success("Saved ✅")
+        out = insert_row("tb_drug_resistance", payload)
+        if out.get("queued"):
+            st.info("Queued ✅ (Offline mode)")
+        else:
+            st.success("Saved ✅")
         st.rerun()
 
     dfr = safe_select_with_order(
         "tb_drug_resistance",
-        {"select": "*", "patient_id": f"eq.{pid}", "limit": "5000"},
+        {"select": "*", "patient_id": f"eq.{pid}", "limit": str(effective_limit())},
         ["created_at.desc", "updated_at.desc"],
     )
     st.dataframe(dfr, use_container_width=True, hide_index=True)
@@ -1322,7 +1554,7 @@ def page_who_dashboard():
     section("WHO Dashboard")
     st.caption("Uses v_who_indicators_monthly view. Organizer sees national; others see facility only.")
 
-    dfw = df_select("v_who_indicators_monthly", {"select": "*", "limit": "50000"})
+    dfw = df_select("v_who_indicators_monthly", {"select": "*", "limit": str(effective_limit())})
     if dfw.empty:
         st.info("No data yet. Add diagnosis events or import GeneXpert.")
         return
@@ -1359,11 +1591,20 @@ def page_gis_heatmap():
     section("GIS Heatmap (Nigeria)")
     st.caption("Uses v_outbreak_facility view. Add latitude/longitude to facilities for mapping.")
 
+    if st.session_state.get("low_bw"):
+        st.info("Low-bandwidth mode: map disabled. Turn it off in sidebar to view map.")
+        try:
+            dfm = df_select("v_outbreak_facility", {"select": "*", "limit": str(effective_limit())})
+            st.dataframe(dfm.head(500), use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.exception(e)
+        return
+
     if px is None:
         st.error("Plotly not installed. Add 'plotly' to requirements.txt then redeploy.")
         return
 
-    dfm = df_select("v_outbreak_facility", {"select": "*", "limit": "50000"})
+    dfm = df_select("v_outbreak_facility", {"select": "*", "limit": str(effective_limit())})
     if dfm.empty:
         st.info("No facilities/events yet.")
         return
@@ -1371,9 +1612,8 @@ def page_gis_heatmap():
     if (not is_organizer()) and ("facility_id" in dfm.columns):
         dfm = dfm[dfm["facility_id"].astype(str) == str(facility_id)]
 
-    # Organizer scope (National / Rivers / Bayelsa / Delta)
     if is_organizer():
-        scope_state = st.session_state.get("org_scope_state")  # None = National
+        scope_state = st.session_state.get("org_scope_state")
         if scope_state and ("state" in dfm.columns):
             dfm = dfm[dfm["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
 
@@ -1384,8 +1624,6 @@ def page_gis_heatmap():
     states = sorted([str(x) for x in dfm.get("state", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
 
     col1, col2, col3 = st.columns(3)
-
-    # Organizer scope control for the page filter
     scope_state = st.session_state.get("org_scope_state") if is_organizer() else None
 
     with col1:
@@ -1395,15 +1633,8 @@ def page_gis_heatmap():
         else:
             state = st.selectbox("State", ["All"] + states)
 
-    # LGA list (outside col1)
     if state != "All" and "state" in dfm.columns:
-        lgas = sorted(
-            [
-                str(x)
-                for x in dfm[dfm["state"] == state].get("lga", pd.Series([])).dropna().unique().tolist()
-                if str(x).strip()
-            ]
-        )
+        lgas = sorted([str(x) for x in dfm[dfm["state"] == state].get("lga", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
     else:
         lgas = sorted([str(x) for x in dfm.get("lga", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
 
@@ -1414,10 +1645,8 @@ def page_gis_heatmap():
         min_cases = st.number_input("Min confirmed TB", 0, 100000, 0)
 
     dff = dfm.copy()
-
     if state != "All" and "state" in dff.columns:
         dff = dff[dff["state"] == state]
-
     if lga != "All" and "lga" in dff.columns:
         dff = dff[dff["lga"] == lga]
 
@@ -1449,7 +1678,7 @@ def page_outbreak_alerts():
     st.caption("Uses v_hotspots view + tb_outbreak_alerts table (7d vs previous 28d).")
 
     try:
-        dfh = df_select("v_hotspots", {"select": "*", "limit": "50000"})
+        dfh = df_select("v_hotspots", {"select": "*", "limit": str(effective_limit())})
     except Exception as e:
         st.error("Could not load v_hotspots.")
         st.exception(e)
@@ -1474,7 +1703,7 @@ def page_exports():
     cols = st.columns(4)
     for i, t in enumerate(tables):
         try:
-            df = df_select(t, {"select": "*", "limit": "50000"})
+            df = df_select(t, {"select": "*", "limit": str(effective_limit())})
             cols[i % 4].download_button(f"{t}.csv", df.to_csv(index=False).encode("utf-8"), f"{t}.csv", "text/csv")
         except Exception:
             cols[i % 4].caption(f"{t} not ready")
@@ -1487,8 +1716,8 @@ def page_national_view():
         st.warning("Organizer only.")
         return
 
-    df_fac = df_select("facilities", {"select": "*", "limit": "50000"})
-    df_evt = df_select("events", {"select": "*", "limit": "50000"})
+    df_fac = df_select("facilities", {"select": "*", "limit": str(effective_limit())})
+    df_evt = df_select("events", {"select": "*", "limit": str(effective_limit())})
     st.subheader("Facilities")
     st.dataframe(df_fac, use_container_width=True, hide_index=True)
     st.subheader("Events")
@@ -1510,6 +1739,7 @@ ROLE_PERMISSIONS = {
         "Treatment",
         "Contact Tracing",
         "Drug Resistance",
+        "AI Drug Resistance Predictor",  # NEW
         "GeneXpert Import",
         "WHO Dashboard",
         "GIS Heatmap",
@@ -1526,6 +1756,7 @@ ROLE_PERMISSIONS = {
         "Treatment",
         "Contact Tracing",
         "Drug Resistance",
+        "AI Drug Resistance Predictor",  # NEW
         "GeneXpert Import",
         "WHO Dashboard",
         "GIS Heatmap",
@@ -1540,6 +1771,7 @@ ROLE_PERMISSIONS = {
         "Adherence",
         "Treatment",
         "Contact Tracing",
+        "AI Drug Resistance Predictor",  # NEW (read/analytics)
         "WHO Dashboard",
         "GIS Heatmap",
         "Outbreak Alerts",
@@ -1547,6 +1779,7 @@ ROLE_PERMISSIONS = {
     "lab": [
         "Home",
         "Drug Resistance",
+        "AI Drug Resistance Predictor",  # NEW
         "GeneXpert Import",
         "WHO Dashboard",
         "GIS Heatmap",
@@ -1557,6 +1790,7 @@ ROLE_PERMISSIONS = {
         "DOTS",
         "Adherence",
         "Treatment",
+        "AI Drug Resistance Predictor",  # NEW (read/analytics)
         "WHO Dashboard",
         "GIS Heatmap",
         "Outbreak Alerts",
@@ -1609,6 +1843,8 @@ elif page_clean == "Contact Tracing":
     page_contact_tracing()
 elif page_clean == "Drug Resistance":
     page_drug_resistance()
+elif page_clean == "AI Drug Resistance Predictor":
+    page_ai_drug_resistance_predictor()
 elif page_clean == "GeneXpert Import":
     page_genexpert_import()
 elif page_clean == "WHO Dashboard":
