@@ -362,15 +362,51 @@ if not is_logged_in():
 # =========================
 # CONTEXT
 # =========================
+# --- Always load staff profile from DB (prevents stale Streamlit session) ---
 profile = st.session_state.get("profile") or {}
+
+# If profile missing or incomplete, fetch from Supabase every time
+if not profile or not profile.get("facility_id"):
+    uid = st.session_state.get("user_id")  # this should be the Supabase Auth UID
+    if not uid:
+        st.error("No authenticated user_id in session. Please log out and log in again.")
+        st.stop()
+
+    r = supabase.table("staff_profiles") \
+        .select("user_id, facility_id, staff_id, full_name, profession, role") \
+        .eq("user_id", uid) \
+        .single() \
+        .execute()
+
+    if not r.data:
+        st.error("No staff profile found for this user. Fix staff_profiles in Supabase.")
+        st.stop()
+
+    profile = r.data
+    st.session_state["profile"] = profile
+    # keep role in sync with staff profile role
+    st.session_state["role"] = profile.get("role") or st.session_state.get("role")
+
 facility_id = profile.get("facility_id")
 if not facility_id:
     st.error("staff_profiles.facility_id missing. Fix in Supabase.")
     st.stop()
 
+# Optional: refresh facility label each run (so UI always shows correct name)
+try:
+    fac = supabase.table("facilities") \
+        .select("facility_name, facility_reg") \
+        .eq("facility_id", facility_id) \
+        .single() \
+        .execute()
+    if fac.data:
+        st.session_state["facility_name"] = fac.data.get("facility_name")
+        st.session_state["facility_reg"] = fac.data.get("facility_reg")
+except Exception:
+    pass
+
 def is_organizer() -> bool:
     return st.session_state.get("role") == "organizer"
-
 # =========================
 # COMMON HELPERS
 # =========================
