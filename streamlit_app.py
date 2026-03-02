@@ -502,7 +502,7 @@ def ai_prediction_df() -> pd.DataFrame:
     if (not is_organizer()) and ("facility_id" in df.columns):
         df = df[df["facility_id"].astype(str) == str(facility_id)]
 
-    # Organizer: optional filter by selected state scope
+    # Organizer: optional filter by selected state scope (National/Rivers/Bayelsa/Delta)
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")  # None = National
         if scope_state and ("state" in df.columns):
@@ -519,14 +519,13 @@ def ai_drivers_df() -> pd.DataFrame:
     if (not is_organizer()) and ("facility_id" in df.columns):
         df = df[df["facility_id"].astype(str) == str(facility_id)]
 
-    # Organizer: optional filter by selected state scope
+    # Organizer: optional filter by selected state scope (National/Rivers/Bayelsa/Delta)
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")  # None = National
         if scope_state and ("state" in df.columns):
             df = df[df["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
 
     return df
-
 def ai_map_df() -> pd.DataFrame:
     df = df_select("v_ai_map_overlay", {"select": "*", "limit": "50000"})
     if df.empty:
@@ -536,7 +535,7 @@ def ai_map_df() -> pd.DataFrame:
     if (not is_organizer()) and ("facility_id" in df.columns):
         df = df[df["facility_id"].astype(str) == str(facility_id)]
 
-    # Organizer: optional filter by selected state scope
+    # Organizer: optional filter by selected state scope (National/Rivers/Bayelsa/Delta)
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")  # None = National
         if scope_state and ("state" in df.columns):
