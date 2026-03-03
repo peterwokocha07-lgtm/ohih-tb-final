@@ -1,6 +1,5 @@
 import os
 import json
-import uuid
 import datetime as dt
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -159,11 +158,6 @@ def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
-def make_offline_patient_key() -> str:
-    # stable key used only inside app / queue mapping
-    return f"OFFLINE:{uuid.uuid4().hex[:12]}"
-
-
 # =========================
 # SESSION
 # =========================
@@ -185,12 +179,9 @@ def ss_init():
     # Offline queue for writes
     st.session_state.setdefault("offline_queue", [])  # List[Dict[str,Any]]
 
-    # Offline patient shadow list (so Patient Picker can see them immediately)
-    # Each: {"offline_key","facility_id","full_name","created_at","age","sex","phone","address"}
-    st.session_state.setdefault("offline_patients", [])
-
-    # Mapping OFFLINE:<key> -> real patient_id after sync
-    st.session_state.setdefault("offline_patient_id_map", {})  # Dict[str,str]
+    # NEW: Offline patient cache + mapping (OFFLINE:* -> real uuid)
+    st.session_state.setdefault("offline_patients", [])  # list of dicts {local_id, full_name, created_at, ...}
+    st.session_state.setdefault("offline_patient_id_map", {})  # dict local_id -> real patient_id
 
 
 ss_init()
@@ -258,29 +249,20 @@ def df_select(table: str, params: Dict[str, str]) -> pd.DataFrame:
     return _clean_df(pd.DataFrame(r.json() or []))
 
 
-def safe_select_with_order(table: str, base_params: Dict[str, str], order_candidates) -> pd.DataFrame:
-    last_err = None
-    for o in order_candidates:
-        try:
-            p = dict(base_params)
-            p["order"] = o
-            return df_select(table, p)
-        except Exception as e:
-            last_err = e
-    if last_err:
-        raise last_err
-    return df_select(table, base_params)
+def _offline_local_id(prefix: str = "PAT") -> str:
+    # stable local id usable in UI & queue (NOT sent to DB as uuid)
+    # Example: OFFLINE:PAT:20260303T120102Z:123456
+    t = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    rnd = int(dt.datetime.utcnow().timestamp() * 1000000) % 1000000
+    return f"OFFLINE:{prefix}:{t}:{rnd:06d}"
 
 
-# =========================
-# OFFLINE QUEUE (FIXED: offline patients visible + id mapping on sync)
-# =========================
 def queue_write(
     table: str,
     payload: Dict[str, Any],
     op: str = "insert",
     match_params: Optional[Dict[str, str]] = None,
-    offline_ref: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
 ):
     item = {
         "queued_at": now_iso(),
@@ -288,37 +270,30 @@ def queue_write(
         "table": table,
         "payload": payload,
         "match_params": match_params or {},
+        "meta": meta or {},
+        "last_error": None,  # will store server error text if sync fails
     }
-    if offline_ref:
-        item["offline_ref"] = offline_ref  # used for OFFLINE patient mapping, etc.
     st.session_state["offline_queue"].append(item)
 
 
 def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    # Offline queues writes
+    # Offline mode queues writes
     if st.session_state.get("offline_mode"):
+        # Special handling: patients offline should be selectable immediately
         if table == "patients":
-            # Create an OFFLINE patient key, store in shadow list for picker, and queue the insert
-            offline_key = make_offline_patient_key()
-
-            # shadow list for UI (so diagnosis can pick this patient immediately)
+            local_id = _offline_local_id("PAT")
+            # Do NOT add patient_id into payload for DB; DB expects UUID.
+            # Keep local id in meta & local cache instead.
+            queue_write("patients", payload, op="insert", meta={"local_patient_id": local_id})
             st.session_state["offline_patients"].append(
                 {
-                    "offline_key": offline_key,
-                    "facility_id": payload.get("facility_id"),
-                    "full_name": payload.get("full_name", ""),
-                    "created_at": payload.get("created_at", now_iso()),
-                    "age": payload.get("age", None),
-                    "sex": payload.get("sex", None),
-                    "phone": payload.get("phone", ""),
-                    "address": payload.get("address", ""),
+                    "local_id": local_id,
+                    "patient_id": local_id,  # for UI uniformity
+                    "full_name": str(payload.get("full_name", "")).strip(),
+                    "created_at": payload.get("created_at") or now_iso(),
                 }
             )
-
-            # IMPORTANT: Do NOT write offline_key into DB payload (may be UUID in DB).
-            # Keep it only as offline_ref for mapping later.
-            queue_write("patients", payload, op="insert", offline_ref=offline_key)
-            return {"queued": True, "table": table, "queued_at": now_iso(), "offline_key": offline_key}
+            return {"queued": True, "table": table, "local_patient_id": local_id, "queued_at": now_iso()}
 
         queue_write(table, payload, op="insert")
         return {"queued": True, "table": table, "queued_at": now_iso()}
@@ -347,112 +322,18 @@ def patch_row(table: str, match_params: Dict[str, str], payload: Dict[str, Any])
         return {"patched": True}
 
 
-def _rewrite_offline_patient_ids_in_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
-    """
-    Replace payload['patient_id'] if it is OFFLINE:* and mapping exists.
-    Returns (new_payload, changed)
-    """
-    if not isinstance(payload, dict):
-        return payload, False
-
-    pid = payload.get("patient_id")
-    if not pid or not isinstance(pid, str):
-        return payload, False
-
-    if not pid.startswith("OFFLINE:"):
-        return payload, False
-
-    mp = st.session_state.get("offline_patient_id_map", {}) or {}
-    if pid in mp:
-        newp = dict(payload)
-        newp["patient_id"] = mp[pid]
-        return newp, True
-
-    return payload, False
-
-
-def sync_offline_queue():
-    q: List[Dict[str, Any]] = st.session_state.get("offline_queue", [])
-    if not q:
-        st.success("Nothing to sync.")
-        return
-
-    tok = st.session_state.get("access_token") or ""
-    if not tok:
-        st.error("No access token found. Please log out and log in again before syncing.")
-        return
-
-    # 1) Sync patients first (so we can map OFFLINE keys -> real patient_id)
-    patient_items = [it for it in q if it.get("table") == "patients" and it.get("op") == "insert"]
-    other_items = [it for it in q if it not in patient_items]
-
-    ok, fail = 0, 0
-    remaining: List[Dict[str, Any]] = []
-
-    # patients-first mapping
-    for item in patient_items:
+def safe_select_with_order(table: str, base_params: Dict[str, str], order_candidates) -> pd.DataFrame:
+    last_err = None
+    for o in order_candidates:
         try:
-            payload = item.get("payload", {}) or {}
-            offline_key = item.get("offline_ref")  # OFFLINE:* key
-
-            r = rest_post("patients", tok, payload)
-            if r.status_code not in (200, 201):
-                raise RuntimeError(r.text)
-
-            rows = r.json() or []
-            row0 = rows[0] if isinstance(rows, list) and rows else (rows or {})
-            real_id = str(row0.get("patient_id") or "").strip()
-
-            if offline_key and real_id:
-                st.session_state["offline_patient_id_map"][offline_key] = real_id
-
-                # remove from shadow list once synced
-                st.session_state["offline_patients"] = [
-                    p for p in (st.session_state.get("offline_patients") or []) if p.get("offline_key") != offline_key
-                ]
-
-            ok += 1
-        except Exception:
-            fail += 1
-            remaining.append(item)
-
-    # 2) Sync everything else, rewriting OFFLINE patient ids before sending
-    for item in other_items:
-        try:
-            table = item.get("table")
-            op = item.get("op", "insert")
-            payload = item.get("payload", {}) or {}
-            match_params = item.get("match_params", {}) or {}
-
-            payload2, _ = _rewrite_offline_patient_ids_in_payload(payload)
-
-            # If payload still contains OFFLINE patient id and no mapping exists -> cannot sync yet, keep queued.
-            pid = payload2.get("patient_id") if isinstance(payload2, dict) else None
-            if isinstance(pid, str) and pid.startswith("OFFLINE:"):
-                raise RuntimeError("Waiting for patient sync mapping")
-
-            if op == "insert":
-                r = rest_post(table, tok, payload2)
-                if r.status_code not in (200, 201):
-                    raise RuntimeError(r.text)
-                ok += 1
-            elif op == "patch":
-                r = rest_patch(table, tok, match_params, payload2)
-                if r.status_code not in (200, 204):
-                    raise RuntimeError(r.text)
-                ok += 1
-            else:
-                raise RuntimeError(f"Unknown op: {op}")
-
-        except Exception:
-            fail += 1
-            remaining.append(item)
-
-    st.session_state["offline_queue"] = remaining
-    if fail == 0:
-        st.success(f"Sync complete ✅ Sent={ok}, Failed={fail}")
-    else:
-        st.warning(f"Sync complete (partial) ⚠️ Sent={ok}, Failed={fail} (kept in queue)")
+            p = dict(base_params)
+            p["order"] = o
+            return df_select(table, p)
+        except Exception as e:
+            last_err = e
+    if last_err:
+        raise last_err
+    return df_select(table, base_params)
 
 
 # =========================
@@ -473,6 +354,7 @@ def load_profile_for_user(user_id: str) -> Dict[str, Any]:
     user_id = (user_id or "").strip()
     if not user_id:
         return {}
+
     tok = st.session_state["access_token"]
     params = {"select": "*", "user_id": f"eq.{user_id}", "limit": "1"}
     r = rest_get("staff_profiles", tok, params=params)
@@ -502,18 +384,42 @@ def load_facility(facility_id: str) -> Dict[str, Any]:
 def org_scope_ui():
     if st.session_state.get("role") != "organizer":
         return
+
     options = ["National", "Rivers", "Bayelsa", "Delta"]
     current = st.session_state.get("org_scope", "National")
     if current not in options:
         current = "National"
+
     choice = st.sidebar.selectbox("🌍 Organizer Scope", options, index=options.index(current))
     st.session_state["org_scope"] = choice
     st.session_state["org_scope_state"] = None if choice == "National" else choice
 
 
+def _queue_preview_df() -> pd.DataFrame:
+    q = st.session_state.get("offline_queue", []) or []
+    if not q:
+        return pd.DataFrame()
+    rows = []
+    for i, item in enumerate(q):
+        rows.append(
+            {
+                "#": i,
+                "table": item.get("table"),
+                "op": item.get("op"),
+                "queued_at": item.get("queued_at"),
+                "depends_on_patient": bool(item.get("meta", {}).get("patient_local_id")),
+                "local_patient_id": item.get("meta", {}).get("local_patient_id"),
+                "last_error": (item.get("last_error") or "")[:180],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def offline_lowbw_ui():
     st.sidebar.markdown("### ⚙️ Performance / Offline")
-    st.session_state["low_bw"] = st.sidebar.toggle("Low-bandwidth mode", value=st.session_state.get("low_bw", False))
+    st.session_state["low_bw"] = st.sidebar.toggle(
+        "Low-bandwidth mode", value=st.session_state.get("low_bw", False)
+    )
     st.session_state["offline_mode"] = st.sidebar.toggle(
         "Offline mode (queue writes)", value=st.session_state.get("offline_mode", False)
     )
@@ -526,8 +432,139 @@ def offline_lowbw_ui():
             st.write("No queued actions.")
         else:
             st.write("Queued actions will be sent when you click **Sync now** (or disable offline mode).")
-            if st.button("Sync now", key="sync_now"):
-                sync_offline_queue()
+            dfq = _queue_preview_df()
+            if not dfq.empty:
+                st.dataframe(dfq, use_container_width=True, hide_index=True)
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Sync now", key="sync_now"):
+                    sync_offline_queue()
+                    st.rerun()
+            with c2:
+                if st.button("Clear queue (DANGER)", key="clear_q"):
+                    st.session_state["offline_queue"] = []
+                    st.warning("Queue cleared.")
+                    st.rerun()
+
+
+def _replace_offline_patient_ids_in_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    """
+    If payload has patient_id like OFFLINE:..., replace with mapped real uuid.
+    Returns (new_payload, replaced?).
+    """
+    p = dict(payload)
+    pid = str(p.get("patient_id", "") or "")
+    if pid.startswith("OFFLINE:"):
+        mp = st.session_state.get("offline_patient_id_map", {}) or {}
+        real = mp.get(pid)
+        if real:
+            p["patient_id"] = real
+            return p, True
+        return p, False
+    return p, True
+
+
+def sync_offline_queue():
+    q: List[Dict[str, Any]] = st.session_state.get("offline_queue", [])
+    if not q:
+        st.success("Nothing to sync.")
+        return
+
+    tok = st.session_state["access_token"]
+
+    ok, fail = 0, 0
+    remaining: List[Dict[str, Any]] = []
+
+    # --- Pass 1: Sync patients first (build OFFLINE -> REAL map)
+    for item in q:
+        if item.get("table") != "patients" or item.get("op") != "insert":
+            continue
+        try:
+            payload = dict(item.get("payload", {}) or {})
+            meta = item.get("meta", {}) or {}
+            local_patient_id = meta.get("local_patient_id")
+
+            # Never send OFFLINE id to DB. Let DB generate UUID.
+            payload.pop("patient_id", None)
+
+            r = rest_post("patients", tok, payload)
+            if r.status_code not in (200, 201):
+                item["last_error"] = f"patients insert failed: {r.status_code} {r.text}"
+                raise RuntimeError(item["last_error"])
+
+            rows = r.json() or []
+            real_patient_id = None
+            if isinstance(rows, list) and rows:
+                real_patient_id = rows[0].get("patient_id")
+            elif isinstance(rows, dict):
+                real_patient_id = rows.get("patient_id")
+
+            if not real_patient_id:
+                item["last_error"] = f"patients insert returned no patient_id: {r.status_code} {r.text}"
+                raise RuntimeError(item["last_error"])
+
+            # Save mapping: OFFLINE local -> real uuid
+            if local_patient_id:
+                st.session_state["offline_patient_id_map"][local_patient_id] = str(real_patient_id)
+
+                # remove from offline_patients cache
+                off = st.session_state.get("offline_patients", []) or []
+                st.session_state["offline_patients"] = [x for x in off if str(x.get("local_id")) != str(local_patient_id)]
+
+            ok += 1
+        except Exception:
+            fail += 1
+            remaining.append(item)
+
+    # --- Pass 2: Sync everything else (events require mapping)
+    for item in q:
+        if item.get("table") == "patients" and item.get("op") == "insert":
+            # already handled in pass 1
+            continue
+
+        try:
+            table = item.get("table")
+            op = item.get("op", "insert")
+            payload = dict(item.get("payload", {}) or {})
+            match_params = item.get("match_params", {}) or {}
+
+            # If this payload has OFFLINE patient_id, replace it now
+            payload2, can_send = _replace_offline_patient_ids_in_payload(payload)
+            if not can_send:
+                item["last_error"] = "Waiting for patient sync (OFFLINE patient_id not mapped yet)."
+                raise RuntimeError(item["last_error"])
+
+            if op == "insert":
+                r = rest_post(table, tok, payload2)
+                if r.status_code not in (200, 201):
+                    item["last_error"] = f"{table} insert failed: {r.status_code} {r.text}"
+                    raise RuntimeError(item["last_error"])
+                ok += 1
+
+            elif op == "patch":
+                r = rest_patch(table, tok, match_params, payload2)
+                if r.status_code not in (200, 204):
+                    item["last_error"] = f"{table} patch failed: {r.status_code} {r.text}"
+                    raise RuntimeError(item["last_error"])
+                ok += 1
+            else:
+                item["last_error"] = f"Unknown op: {op}"
+                raise RuntimeError(item["last_error"])
+
+        except Exception:
+            fail += 1
+            remaining.append(item)
+
+    st.session_state["offline_queue"] = remaining
+
+    if fail == 0:
+        st.success(f"Sync complete ✅ Sent={ok}, Failed={fail}")
+    else:
+        st.warning(f"Sync complete (partial) ⚠️ Sent={ok}, Failed={fail} (kept in queue)")
+        # Show detailed errors
+        dfq = _queue_preview_df()
+        if not dfq.empty:
+            st.dataframe(dfq, use_container_width=True, hide_index=True)
 
 
 # =========================
@@ -669,7 +706,7 @@ if not is_logged_in():
 
 
 # =========================
-# CONTEXT (stable: always reload profile + facility correctly)
+# CONTEXT
 # =========================
 uid = (st.session_state.get("user_id") or "").strip()
 if not uid:
@@ -706,16 +743,7 @@ else:
 # COMMON HELPERS
 # =========================
 def patient_picker() -> Optional[str]:
-    """
-    FIXED:
-    - Shows online patients from DB
-    - PLUS any offline queued patients (shadow list) immediately
-    - Returns either:
-        * real patient_id (online), OR
-        * OFFLINE:<key> (offline) which will be rewritten to real id on sync
-    """
-    # Online patients
-    dfp = pd.DataFrame()
+    # Online (Supabase) patients
     try:
         dfp = safe_select_with_order(
             "patients",
@@ -723,38 +751,23 @@ def patient_picker() -> Optional[str]:
             ["created_at.desc", "updated_at.desc", "patient_id.desc"],
         )
     except Exception:
-        # If network is poor, we still allow offline patients
         dfp = pd.DataFrame(columns=["patient_id", "full_name", "created_at"])
 
-    # Facility scope (if DB view/table isn't RLS-filtered on read)
-    if not is_organizer() and not dfp.empty and "facility_id" in dfp.columns:
-        dfp = dfp[dfp["facility_id"].astype(str) == str(facility_id)]
+    # Offline local patients (immediately selectable)
+    off = st.session_state.get("offline_patients", []) or []
+    dfo = pd.DataFrame(off) if off else pd.DataFrame(columns=["patient_id", "full_name", "created_at"])
+    if not dfo.empty and "patient_id" not in dfo.columns:
+        dfo["patient_id"] = dfo.get("local_id", "")
+    if not dfo.empty and "full_name" not in dfo.columns:
+        dfo["full_name"] = ""
 
-    # Offline shadow patients for this facility
-    offline_pts = st.session_state.get("offline_patients") or []
-    offline_pts = [p for p in offline_pts if str(p.get("facility_id")) == str(facility_id)]
+    df = pd.concat([dfo[["patient_id", "full_name", "created_at"]] if not dfo.empty else dfo, dfp], ignore_index=True)
 
-    # Build choices
-    labels: List[str] = []
-
-    # offline first (so user sees what they just created)
-    for p in sorted(offline_pts, key=lambda x: str(x.get("created_at", "")), reverse=True):
-        oid = p.get("offline_key")
-        nm = p.get("full_name", "Unnamed (offline)")
-        labels.append(f"{oid} — {nm}  (OFFLINE)")
-
-    if not dfp.empty and ("patient_id" in dfp.columns) and ("full_name" in dfp.columns):
-        try:
-            dfp["created_at"] = dfp.get("created_at")
-        except Exception:
-            pass
-        for _, r in dfp.iterrows():
-            labels.append(f"{str(r['patient_id'])} — {str(r['full_name'])}")
-
-    if not labels:
+    if df.empty:
         st.info("No patients yet. Add one first.")
         return None
 
+    labels = (df["patient_id"].astype(str) + " — " + df["full_name"].astype(str)).tolist()
     chosen = st.selectbox("Select patient", labels)
     return chosen.split(" — ")[0].strip()
 
@@ -1129,35 +1142,18 @@ def page_ai_drug_resistance_predictor():
         scope_state = st.session_state.get("org_scope_state")
         if scope_state:
             try:
-                df_fac = df_select(
-                    "facilities",
-                    {"select": "facility_id,state,lga,facility_name", "limit": str(effective_limit())},
-                )
+                df_fac = df_select("facilities", {"select": "facility_id,state,lga,facility_name", "limit": str(effective_limit())})
                 if not df_fac.empty and "state" in df_fac.columns:
                     dfr = dfr.merge(df_fac, on="facility_id", how="left")
                     dfr = dfr[dfr["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
             except Exception:
                 pass
 
-    show_cols = [
-        c
-        for c in [
-            "patient_id",
-            "resistance_class",
-            "test_method",
-            "created_at",
-            "notes",
-            "facility_id",
-            "facility_name",
-            "state",
-            "lga",
-        ]
-        if c in dfr.columns
-    ]
+    show_cols = [c for c in ["patient_id", "resistance_class", "test_method", "created_at", "notes", "facility_id", "facility_name", "state", "lga"] if c in dfr.columns]
     if "created_at" in dfr.columns:
-        dfr = dfr.sort_values("created_at", ascending=False)
-
-    st.dataframe(dfr[show_cols], use_container_width=True, hide_index=True)
+        st.dataframe(dfr[show_cols].sort_values("created_at", ascending=False), use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(dfr[show_cols], use_container_width=True, hide_index=True)
 
     st.subheader("Summary")
     if "resistance_class" in dfr.columns:
@@ -1185,6 +1181,9 @@ def page_patients():
     render_topbar()
     section("Patients")
 
+    if st.session_state.get("offline_mode"):
+        st.info("Offline mode is ON: new patients will be queued and appear immediately in the picker.")
+
     with st.expander("➕ Register new patient", expanded=True):
         full_name = st.text_input("Full name *")
         age = st.number_input("Age", 0, 120, 30)
@@ -1209,25 +1208,27 @@ def page_patients():
 
             out = insert_row("patients", payload)
             if out.get("queued"):
-                st.info(f"Queued ✅ (Offline mode). Patient will appear immediately in Diagnosis picker.")
+                st.info(f"Queued ✅ (Offline). Local ID: {out.get('local_patient_id')}")
             else:
                 st.success(f"Saved ✅ Patient: {out.get('patient_id')}")
             st.rerun()
 
-    # online list
+    # Show both online + offline patients
     dfp = safe_select_with_order(
         "patients",
         {"select": "*", "limit": str(effective_limit())},
         ["created_at.desc", "updated_at.desc", "patient_id.desc"],
     )
-    st.dataframe(dfp, use_container_width=True, hide_index=True)
+    off = st.session_state.get("offline_patients", []) or []
+    dfo = pd.DataFrame(off) if off else pd.DataFrame()
+    with st.expander("Offline patients (local)", expanded=False):
+        if dfo.empty:
+            st.caption("None.")
+        else:
+            st.dataframe(dfo, use_container_width=True, hide_index=True)
 
-    # show offline shadow patients (facility)
-    if not is_organizer():
-        offline_pts = [p for p in (st.session_state.get("offline_patients") or []) if str(p.get("facility_id")) == str(facility_id)]
-        if offline_pts:
-            with st.expander("Offline patients (not yet synced)"):
-                st.dataframe(pd.DataFrame(offline_pts), use_container_width=True, hide_index=True)
+    st.subheader("Patients (Supabase)")
+    st.dataframe(dfp, use_container_width=True, hide_index=True)
 
 
 def page_diagnosis_events():
@@ -1236,6 +1237,10 @@ def page_diagnosis_events():
     pid = patient_picker()
     if not pid:
         st.stop()
+
+    # If selected patient is OFFLINE and not yet synced, warn user
+    if str(pid).startswith("OFFLINE:"):
+        st.warning("You selected an OFFLINE patient. You can still save events offline. When you Sync, patients will sync first, then events.")
 
     tb_probability = st.slider("TB Probability", 0.0, 1.0, 0.2, 0.01)
     category = st.selectbox("Category", ["LOW", "MODERATE", "HIGH", "CONFIRMED TB"])
@@ -1334,13 +1339,10 @@ def page_diagnosis_events():
         f"**Next step:** {recommendation}"
     )
 
-    if str(pid).startswith("OFFLINE:"):
-        st.caption("🛰️ Selected patient is OFFLINE. Save events normally; they will sync after patient sync mapping.")
-
     if st.button("Save event", type="primary"):
         payload = {
             "facility_id": facility_id,
-            "patient_id": pid,  # may be OFFLINE:*; will be rewritten on sync
+            "patient_id": pid,  # can be OFFLINE:* in offline mode
             "tb_probability": float(tb_probability),
             "category": category,
             "genexpert": genexpert,
@@ -1419,11 +1421,7 @@ def page_dots():
             st.rerun()
         else:
             if "duplicate key" in r.text.lower() or r.status_code == 409:
-                match = {
-                    "facility_id": f"eq.{facility_id}",
-                    "patient_id": f"eq.{pid}",
-                    "date": f"eq.{date.isoformat()}",
-                }
+                match = {"facility_id": f"eq.{facility_id}", "patient_id": f"eq.{pid}", "date": f"eq.{date.isoformat()}"}
                 try:
                     patch_row("dots_daily", match, {"dose_taken": bool(dose_taken), "note": note.strip()})
                     st.success("Updated ✅")
@@ -1447,19 +1445,13 @@ def page_adherence():
 
     missed_7 = st.number_input("Missed doses (last 7 days)", 0, 7, 0)
     missed_28 = st.number_input("Missed doses (last 28 days)", 0, 28, 0)
-    missed_streak = st.selectbox(
-        "Longest missed streak", ["0 days", "1–2 days", "3–6 days", "1 week", "2 weeks", "3 weeks", "1 month+"]
-    )
+    missed_streak = st.selectbox("Longest missed streak", ["0 days", "1–2 days", "3–6 days", "1 week", "2 weeks", "3 weeks", "1 month+"])
     completed = st.checkbox("Completed regimen", False)
 
     adh_7 = max(0.0, 100.0 * (1 - missed_7 / 7))
     adh_28 = max(0.0, 100.0 * (1 - missed_28 / 28))
     flag = missed_28 >= 8
-    risk = (
-        "High"
-        if flag or missed_streak in ("2 weeks", "3 weeks", "1 month+")
-        else ("Moderate" if missed_streak in ("1 week", "3–6 days") else "Low")
-    )
+    risk = "High" if flag or missed_streak in ("2 weeks", "3 weeks", "1 month+") else ("Moderate" if missed_streak in ("1 week", "3–6 days") else "Low")
 
     st.write(f"Adherence 7d: {adh_7:.1f}% | 28d: {adh_28:.1f}% | Risk: {risk}")
 
@@ -1486,9 +1478,7 @@ def page_adherence():
             st.success("Saved ✅")
         st.rerun()
 
-    dfa = safe_select_with_order(
-        "adherence", {"select": "*", "limit": str(effective_limit())}, ["timestamp.desc", "created_at.desc", "created_by.desc"]
-    )
+    dfa = safe_select_with_order("adherence", {"select": "*", "limit": str(effective_limit())}, ["timestamp.desc", "created_at.desc", "created_by.desc"])
     st.dataframe(dfa, use_container_width=True, hide_index=True)
 
 
@@ -1704,7 +1694,8 @@ def page_genexpert_import():
                             "created_at": now_iso(),
                         },
                     )
-                    pid = str(outp.get("patient_id"))
+                    # If offline mode is on, import should not run (but just in case)
+                    pid = str(outp.get("patient_id") or outp.get("local_patient_id") or "")
 
                 category = "CONFIRMED TB" if mtb_detected else "LOW"
                 genx = "Positive" if mtb_detected else "Negative"
@@ -1837,13 +1828,7 @@ def page_gis_heatmap():
             state = st.selectbox("State", ["All"] + states)
 
     if state != "All" and "state" in dfm.columns:
-        lgas = sorted(
-            [
-                str(x)
-                for x in dfm[dfm["state"] == state].get("lga", pd.Series([])).dropna().unique().tolist()
-                if str(x).strip()
-            ]
-        )
+        lgas = sorted([str(x) for x in dfm[dfm["state"] == state].get("lga", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
     else:
         lgas = sorted([str(x) for x in dfm.get("lga", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
 
