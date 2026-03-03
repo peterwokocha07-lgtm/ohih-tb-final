@@ -1,5 +1,7 @@
 import os
+import json
 import uuid
+import base64
 import datetime as dt
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -11,6 +13,16 @@ try:
     import plotly.express as px
 except Exception:
     px = None
+
+# ------------------------------------------------------------
+# OPTIONAL: Cookie manager for "stay logged in after refresh"
+# ------------------------------------------------------------
+try:
+    import extra_streamlit_components as stx  # pip install extra-streamlit-components
+    _COOKIE_OK = True
+except Exception:
+    stx = None
+    _COOKIE_OK = False
 
 # ============================================================
 # BRANDING (OHIH-TB) + NATIONAL DASHBOARD LOOK
@@ -168,6 +180,113 @@ def now_iso() -> str:
 
 
 # =========================
+# COOKIE SESSION (PERSIST LOGIN ON REFRESH)
+# =========================
+COOKIE_PREFIX = "ohih_tb_"
+COOKIE_DAYS = 7  # how long to keep user logged in on same browser
+
+
+def _b64e(s: str) -> str:
+    return base64.urlsafe_b64encode((s or "").encode("utf-8")).decode("utf-8")
+
+
+def _b64d(s: str) -> str:
+    try:
+        return base64.urlsafe_b64decode((s or "").encode("utf-8")).decode("utf-8")
+    except Exception:
+        return ""
+
+
+@st.cache_resource
+def get_cookie_manager():
+    if not _COOKIE_OK:
+        return None
+    return stx.CookieManager()
+
+
+def cookie_get(name: str) -> str:
+    cm = get_cookie_manager()
+    if not cm:
+        return ""
+    try:
+        v = cm.get(COOKIE_PREFIX + name)
+        return str(v) if v is not None else ""
+    except Exception:
+        return ""
+
+
+def cookie_set(name: str, value: str):
+    cm = get_cookie_manager()
+    if not cm:
+        return
+    try:
+        expires = dt.datetime.now() + dt.timedelta(days=COOKIE_DAYS)
+        cm.set(COOKIE_PREFIX + name, str(value), expires_at=expires)
+    except Exception:
+        pass
+
+
+def cookie_del(name: str):
+    cm = get_cookie_manager()
+    if not cm:
+        return
+    try:
+        cm.delete(COOKIE_PREFIX + name)
+    except Exception:
+        pass
+
+
+def persist_session_to_cookies():
+    """Write minimal auth state so refresh doesn't force login again."""
+    if not _COOKIE_OK:
+        return
+    if not st.session_state.get("access_token") or not st.session_state.get("user_id"):
+        return
+
+    cookie_set("access_token", _b64e(st.session_state.get("access_token", "")))
+    cookie_set("user_id", st.session_state.get("user_id", ""))
+    cookie_set("role", st.session_state.get("role", "standard"))
+    cookie_set("facility_id", str(st.session_state.get("facility_id") or ""))
+    cookie_set("facility_name", st.session_state.get("facility_name", ""))
+    cookie_set("facility_reg", st.session_state.get("facility_reg", ""))
+    cookie_set("org_scope", st.session_state.get("org_scope", "National"))
+    cookie_set("org_scope_state", str(st.session_state.get("org_scope_state") or ""))
+    cookie_set("last_page", st.session_state.get("last_page", "Home"))
+
+
+def restore_session_from_cookies():
+    """On fresh page load / refresh, restore session_state from cookies."""
+    if not _COOKIE_OK:
+        return False
+
+    tok_b64 = cookie_get("access_token")
+    uid = cookie_get("user_id")
+    if not tok_b64 or not uid:
+        return False
+
+    tok = _b64d(tok_b64)
+    if not tok:
+        return False
+
+    # Restore
+    st.session_state["access_token"] = tok
+    st.session_state["user_id"] = uid
+    st.session_state["role"] = cookie_get("role") or "standard"
+
+    fac_id = cookie_get("facility_id")
+    st.session_state["facility_id"] = fac_id if fac_id else None
+    st.session_state["facility_name"] = cookie_get("facility_name") or ""
+    st.session_state["facility_reg"] = cookie_get("facility_reg") or ""
+
+    st.session_state["org_scope"] = cookie_get("org_scope") or "National"
+    oss = cookie_get("org_scope_state")
+    st.session_state["org_scope_state"] = None if (oss.strip() == "" or oss.lower() == "none") else oss
+
+    st.session_state["last_page"] = cookie_get("last_page") or "Home"
+    return True
+
+
+# =========================
 # SESSION
 # =========================
 def ss_init():
@@ -181,28 +300,33 @@ def ss_init():
     st.session_state.setdefault("facility_id", None)
     st.session_state.setdefault("role", "standard")
 
-    # Organizer writing context (because DB requires facility_id NOT NULL)
-    st.session_state.setdefault("write_facility_id", None)
-    st.session_state.setdefault("write_facility_label", None)
+    # UI: remember where user was
+    st.session_state.setdefault("last_page", "Home")
 
     # Offline + Low-bandwidth
     st.session_state.setdefault("offline_mode", False)
     st.session_state.setdefault("low_bw", False)
 
     # Offline queue for writes
-    st.session_state.setdefault("offline_queue", [])
+    st.session_state.setdefault("offline_queue", [])  # List[Dict[str,Any]]
 
     # Local cache so newly created OFFLINE patients appear immediately in pickers
-    st.session_state.setdefault("local_patients", [])
-
+    st.session_state.setdefault("local_patients", [])  # List[Dict[str,Any]] (offline-created)
     # temp-id mapping after sync (OFFLINE-xxx -> real uuid)
-    st.session_state.setdefault("id_map", {})
-
+    st.session_state.setdefault("id_map", {})  # Dict[str,str]
     # last sync errors for debugging
-    st.session_state.setdefault("offline_last_errors", [])
+    st.session_state.setdefault("offline_last_errors", [])  # List[str]
 
 
 ss_init()
+
+# On a hard refresh, try to restore session from cookies BEFORE login logic.
+# Only do it if session is currently empty.
+if _COOKIE_OK and (not st.session_state.get("access_token")) and (not st.session_state.get("user_id")):
+    restored = restore_session_from_cookies()
+    if restored:
+        # Force rerun so rest of app sees user as logged in immediately
+        st.rerun()
 
 
 def is_logged_in() -> bool:
@@ -210,6 +334,18 @@ def is_logged_in() -> bool:
 
 
 def logout():
+    # Clear cookies
+    cookie_del("access_token")
+    cookie_del("user_id")
+    cookie_del("role")
+    cookie_del("facility_id")
+    cookie_del("facility_name")
+    cookie_del("facility_reg")
+    cookie_del("org_scope")
+    cookie_del("org_scope_state")
+    cookie_del("last_page")
+
+    # Clear session
     for k in list(st.session_state.keys()):
         del st.session_state[k]
     ss_init()
@@ -268,106 +404,20 @@ def df_select(table: str, params: Dict[str, str]) -> pd.DataFrame:
 
 
 def queue_write(table: str, payload: Dict[str, Any], op: str = "insert", match_params: Optional[Dict[str, str]] = None):
-    st.session_state["offline_queue"].append(
-        {
-            "queued_at": now_iso(),
-            "op": op,  # "insert" or "patch"
-            "table": table,
-            "payload": payload,
-            "match_params": match_params or {},
-        }
-    )
-
-
-# =========================
-# FACILITY WRITE CONTEXT (CRITICAL FIX)
-# =========================
-def get_write_facility_id() -> Optional[str]:
-    """
-    DB schema requires patients.facility_id NOT NULL.
-    - For facility users: use their facility_id.
-    - For organizer: MUST select a facility to write under (write_facility_id).
-    """
-    if not is_organizer():
-        fid = st.session_state.get("facility_id")
-        return str(fid) if fid is not None and str(fid).strip() else None
-
-    fid = st.session_state.get("write_facility_id")
-    return str(fid) if fid is not None and str(fid).strip() else None
-
-
-def assert_can_write(table: str):
-    must_have_fac = {
-        "patients",
-        "events",
-        "dots_daily",
-        "adherence",
-        "tb_treatment",
-        "tb_contacts",
-        "tb_drug_resistance",
+    item = {
+        "queued_at": now_iso(),
+        "op": op,  # "insert" or "patch"
+        "table": table,
+        "payload": payload,
+        "match_params": match_params or {},
     }
-    if table in must_have_fac:
-        fid = get_write_facility_id()
-        if not fid:
-            raise RuntimeError(
-                f"Cannot save '{table}' because facility_id is required.\n\n"
-                f"If you are logged in as ORGANIZER, select a facility in the sidebar under **Organizer Write Facility**.\n"
-                f"If you are a facility user, ensure staff_profiles.facility_id is filled."
-            )
+    st.session_state["offline_queue"].append(item)
 
 
-def organizer_write_facility_ui():
-    """
-    Organizer can view national data, but WRITES must be assigned to a facility_id.
-    """
-    if not is_organizer():
-        return
-
-    st.sidebar.markdown("### 🏥 Organizer Write Facility")
-    st.sidebar.caption("Needed because DB tables (patients/events/...) require facility_id (NOT NULL).")
-
-    try:
-        df_fac = df_select("facilities", {"select": "facility_id,facility_name,state,lga", "limit": str(min(effective_limit(), 5000))})
-    except Exception:
-        st.sidebar.warning("Could not load facilities list (check RLS or table).")
-        return
-
-    if df_fac.empty:
-        st.sidebar.warning("No facilities found.")
-        return
-
-    def _mk_label(r) -> str:
-        return f"{r.get('facility_name','')} | {r.get('state','')} {r.get('lga','')} | {r.get('facility_id','')}"
-
-    df_fac = df_fac.copy()
-    df_fac["__label"] = df_fac.apply(lambda r: _mk_label(r.to_dict()), axis=1)
-
-    labels = df_fac["__label"].tolist()
-    current_label = st.session_state.get("write_facility_label")
-
-    if current_label not in labels:
-        # keep previously set facility_id if it still exists
-        cur_id = st.session_state.get("write_facility_id")
-        if cur_id is not None:
-            hits = df_fac[df_fac["facility_id"].astype(str) == str(cur_id)]
-            if not hits.empty:
-                current_label = hits.iloc[0]["__label"]
-        if current_label not in labels:
-            current_label = labels[0]
-
-    choice = st.sidebar.selectbox("Choose facility for data entry", labels, index=labels.index(current_label))
-    st.session_state["write_facility_label"] = choice
-    chosen_id = str(df_fac[df_fac["__label"] == choice].iloc[0]["facility_id"])
-    st.session_state["write_facility_id"] = chosen_id
-
-
-# =========================
-# OFFLINE ID MAPPING
-# =========================
 def _resolve_ids_in_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     mp: Dict[str, str] = st.session_state.get("id_map", {}) or {}
     out = dict(payload)
-    for k in ["patient_id", "index_patient_id"]:
+    for k in ["patient_id", "facility_id", "index_patient_id"]:
         if k in out and isinstance(out[k], str) and out[k].startswith("OFFLINE-") and out[k] in mp:
             out[k] = mp[out[k]]
     return out
@@ -375,20 +425,21 @@ def _resolve_ids_in_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    OFFLINE DESIGN (FIXED):
-      - Offline patients: temp OFFLINE id for UI; queued payload omits patient_id and stores _offline_temp_patient_id
-      - Other tables can reference OFFLINE-* and will be delayed until mapping exists
+    Offline:
+      - For patients: create temp OFFLINE id and store locally so pickers can see it.
+      - For other tables: queue normally; if patient_id is OFFLINE it will be mapped during sync.
     """
-    assert_can_write(table)
-
-    # Ensure payload facility_id is set (write context)
-    p = dict(payload)
-    if "facility_id" in p and (p.get("facility_id") is None or str(p.get("facility_id")).strip() == ""):
-        p["facility_id"] = get_write_facility_id()
-
     if st.session_state.get("offline_mode"):
+        p = dict(payload)
+
         if table == "patients":
+            # Ensure facility_id is always present for patients (NOT NULL constraint)
+            if not p.get("facility_id"):
+                # Organizer must choose a facility; facility users already have one.
+                raise RuntimeError("Offline patient save failed: facility_id is missing. Select a facility context first.")
+
             temp_id = f"OFFLINE-{uuid.uuid4()}"
+            p["patient_id"] = temp_id
 
             st.session_state["local_patients"].append(
                 {
@@ -404,14 +455,11 @@ def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 }
             )
 
-            p.pop("patient_id", None)
-            p["_offline_temp_patient_id"] = temp_id
-
         queue_write(table, p, op="insert")
         return {"queued": True, "table": table, "queued_at": now_iso()}
 
     tok = st.session_state["access_token"]
-    r = rest_post(table, tok, p)
+    r = rest_post(table, tok, payload)
     if r.status_code not in (200, 201):
         raise RuntimeError(f"{table} insert failed: {r.status_code} {r.text}")
     rows = r.json()
@@ -419,8 +467,6 @@ def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def patch_row(table: str, match_params: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, Any]:
-    assert_can_write(table)
-
     if st.session_state.get("offline_mode"):
         queue_write(table, payload, op="patch", match_params=match_params)
         return {"queued": True, "op": "patch", "table": table, "queued_at": now_iso()}
@@ -468,6 +514,7 @@ def load_profile_for_user(user_id: str) -> Dict[str, Any]:
     user_id = (user_id or "").strip()
     if not user_id:
         return {}
+
     tok = st.session_state["access_token"]
     params = {"select": "*", "user_id": f"eq.{user_id}", "limit": "1"}
     r = rest_get("staff_profiles", tok, params=params)
@@ -497,10 +544,12 @@ def load_facility(facility_id: str) -> Dict[str, Any]:
 def org_scope_ui():
     if st.session_state.get("role") != "organizer":
         return
+
     options = ["National", "Rivers", "Bayelsa", "Delta"]
     current = st.session_state.get("org_scope", "National")
     if current not in options:
         current = "National"
+
     choice = st.sidebar.selectbox("🌍 Organizer Scope", options, index=options.index(current))
     st.session_state["org_scope"] = choice
     st.session_state["org_scope_state"] = None if choice == "National" else choice
@@ -508,10 +557,10 @@ def org_scope_ui():
 
 def sync_offline_queue():
     """
-    1) Sync PATIENTS first
-    2) Map OFFLINE-* patient_id -> real uuid returned by Supabase
-    3) Delay any events/contacts/etc that still reference OFFLINE-* without mapping
-    4) Guarantee facility_id on send (schema NOT NULL)
+    Sync order:
+      1) patients inserts
+      2) everything else (events, contacts, resistance...)
+    Also maps OFFLINE-* patient_id to real UUID from Supabase.
     """
     q: List[Dict[str, Any]] = st.session_state.get("offline_queue", [])
     st.session_state["offline_last_errors"] = []
@@ -535,48 +584,23 @@ def sync_offline_queue():
 
         payload2 = _resolve_ids_in_payload(payload)
 
-        # facility_id guard (for older queued items)
-        if "facility_id" in payload2 and (payload2.get("facility_id") is None or str(payload2.get("facility_id")).strip() == ""):
-            payload2["facility_id"] = get_write_facility_id()
-
-        # still must not be empty
-        if table in {"patients", "events", "dots_daily", "adherence", "tb_treatment", "tb_contacts", "tb_drug_resistance"}:
-            if payload2.get("facility_id") is None or str(payload2.get("facility_id")).strip() == "":
-                return False, f"{table} requires facility_id but it is empty. Select Organizer Write Facility (or fix staff_profiles.facility_id)."
-
-        # DELAY if OFFLINE ids still unresolved
-        mp = st.session_state.get("id_map", {}) or {}
-        for fk in ("patient_id", "index_patient_id"):
-            v = payload2.get(fk)
-            if isinstance(v, str) and v.startswith("OFFLINE-") and v not in mp:
-                return False, f"DELAY: {table} requires mapping for {fk}={v}"
-
         if op == "insert":
+            r = rest_post(table, tok, payload2)
+            if r.status_code not in (200, 201):
+                return False, f"{table} insert failed: {r.status_code} {r.text}"
+
             if table == "patients":
-                temp_id = payload.get("_offline_temp_patient_id")
-                payload2 = dict(payload2)
-                payload2.pop("_offline_temp_patient_id", None)
-
-                r = rest_post(table, tok, payload2)
-                if r.status_code not in (200, 201):
-                    return False, f"{table} insert failed: {r.status_code} {r.text}"
-
                 try:
                     rows = r.json() or []
                     if isinstance(rows, list) and rows:
                         real_id = rows[0].get("patient_id")
                     else:
                         real_id = (rows or {}).get("patient_id")
+                    temp_id = payload.get("patient_id")
                     if isinstance(temp_id, str) and temp_id.startswith("OFFLINE-") and real_id:
                         st.session_state["id_map"][temp_id] = str(real_id)
                 except Exception:
                     pass
-
-                return True, ""
-
-            r = rest_post(table, tok, payload2)
-            if r.status_code not in (200, 201):
-                return False, f"{table} insert failed: {r.status_code} {r.text}"
             return True, ""
 
         if op == "patch":
@@ -595,6 +619,7 @@ def sync_offline_queue():
 
         return False, f"Unknown op: {op}"
 
+    # Patients first
     for item in patients_first:
         try:
             ok_flag, err = send_item(item)
@@ -609,7 +634,19 @@ def sync_offline_queue():
             remaining.append(item)
             st.session_state["offline_last_errors"].append(f"patients insert exception: {e}")
 
+    # Everything else
     for item in rest:
+        # If an item still references an OFFLINE patient not mapped yet, delay it
+        payload = item.get("payload", {}) or {}
+        pid = payload.get("patient_id") or payload.get("index_patient_id")
+        if isinstance(pid, str) and pid.startswith("OFFLINE-") and pid not in (st.session_state.get("id_map") or {}):
+            fail += 1
+            remaining.append(item)
+            st.session_state["offline_last_errors"].append(
+                f"DELAY: {item.get('table')} requires mapping for patient_id={pid}"
+            )
+            continue
+
         try:
             ok_flag, err = send_item(item)
             if ok_flag:
@@ -623,10 +660,11 @@ def sync_offline_queue():
             remaining.append(item)
             st.session_state["offline_last_errors"].append(f"{item.get('table')} exception: {e}")
 
+    # Cleanup local patients that are mapped
     if st.session_state.get("id_map"):
         mapped = set(st.session_state["id_map"].keys())
         st.session_state["local_patients"] = [
-            p for p in (st.session_state.get("local_patients", []) or []) if p.get("patient_id") not in mapped
+            p for p in st.session_state["local_patients"] if p.get("patient_id") not in mapped
         ]
 
     st.session_state["offline_queue"] = remaining
@@ -636,7 +674,7 @@ def sync_offline_queue():
     else:
         st.warning(f"Sync complete (partial) ⚠️ Sent={ok}, Failed={fail} (kept in queue)")
         with st.expander("Why did sync fail? (show errors)"):
-            for e in st.session_state.get("offline_last_errors", [])[:50]:
+            for e in st.session_state.get("offline_last_errors", [])[:30]:
                 st.write("•", e)
 
 
@@ -747,11 +785,13 @@ with st.sidebar:
         st.write("Facility:", st.session_state.get("facility_name"))
 
         org_scope_ui()
-        organizer_write_facility_ui()
         offline_lowbw_ui()
 
         if st.button("Logout"):
             logout()
+    else:
+        if not _COOKIE_OK:
+            st.caption("ℹ️ Tip: install `extra-streamlit-components` to stay logged in after refresh.")
     st.divider()
 
 
@@ -762,6 +802,7 @@ if not is_logged_in():
     render_topbar()
     section("Login")
     st.subheader("Login (Email + Password)")
+
     email = st.text_input("Email")
     password = st.text_input("Password", type="password")
 
@@ -792,15 +833,18 @@ if not is_logged_in():
             st.session_state["facility_reg"] = fac.get("facility_reg", "") or ""
             st.session_state["facility_id"] = str(fac_id)
 
+        # Persist login so refresh stays logged in
+        persist_session_to_cookies()
+
         st.success("Login OK")
         st.rerun()
 
     st.stop()
 
 
-# =========================
-# CONTEXT (stable: always reload profile + facility correctly)
-# =========================
+# ============================================================
+# CONTEXT (always reload profile + facility correctly)
+# ============================================================
 uid = (st.session_state.get("user_id") or "").strip()
 if not uid:
     st.error("No authenticated user_id in session. Please log out and log in again.")
@@ -831,6 +875,8 @@ else:
     st.session_state["facility_name"] = fac.get("facility_name", "") or "—"
     st.session_state["facility_reg"] = fac.get("facility_reg", "") or ""
 
+# Refresh-safe: keep cookies updated
+persist_session_to_cookies()
 
 # =========================
 # COMMON HELPERS
@@ -840,15 +886,8 @@ def _local_patients_df() -> pd.DataFrame:
     if not lp:
         return pd.DataFrame()
     df = pd.DataFrame(lp)
-
-    # If facility user, show only their facility
-    if "facility_id" in df.columns and not is_organizer() and st.session_state.get("facility_id") is not None:
-        df = df[df["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
-
-    # If organizer, optionally filter by selected write facility
-    if is_organizer() and st.session_state.get("write_facility_id"):
-        df = df[df["facility_id"].astype(str) == str(st.session_state.get("write_facility_id"))]
-
+    if "facility_id" in df.columns and not is_organizer() and facility_id is not None:
+        df = df[df["facility_id"].astype(str) == str(facility_id)]
     return df
 
 
@@ -859,15 +898,9 @@ def patient_picker() -> Optional[str]:
         ["created_at.desc", "updated_at.desc", "patient_id.desc"],
     )
 
-    # Facility users: filter
-    if not is_organizer() and (not dfp.empty) and ("facility_id" in dfp.columns) and st.session_state.get("facility_id") is not None:
-        dfp = dfp[dfp["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
+    if not is_organizer() and (not dfp.empty) and ("facility_id" in dfp.columns) and facility_id is not None:
+        dfp = dfp[dfp["facility_id"].astype(str) == str(facility_id)]
 
-    # Organizer: optionally filter by selected write facility (to keep pickers focused)
-    if is_organizer() and st.session_state.get("write_facility_id") and (not dfp.empty) and ("facility_id" in dfp.columns):
-        dfp = dfp[dfp["facility_id"].astype(str) == str(st.session_state.get("write_facility_id"))]
-
-    # Add offline-created patients
     dfl = _local_patients_df()
     if not dfl.empty:
         dfl = dfl[["patient_id", "full_name", "created_at"]].copy()
@@ -921,7 +954,7 @@ def ai_prediction_df() -> pd.DataFrame:
     if df.empty:
         return df
     if (not is_organizer()) and ("facility_id" in df.columns):
-        df = df[df["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
+        df = df[df["facility_id"].astype(str) == str(facility_id)]
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")
         if scope_state and ("state" in df.columns):
@@ -934,7 +967,7 @@ def ai_drivers_df() -> pd.DataFrame:
     if df.empty:
         return df
     if (not is_organizer()) and ("facility_id" in df.columns):
-        df = df[df["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
+        df = df[df["facility_id"].astype(str) == str(facility_id)]
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")
         if scope_state and ("state" in df.columns):
@@ -947,7 +980,7 @@ def ai_map_df() -> pd.DataFrame:
     if df.empty:
         return df
     if (not is_organizer()) and ("facility_id" in df.columns):
-        df = df[df["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
+        df = df[df["facility_id"].astype(str) == str(facility_id)]
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")
         if scope_state and ("state" in df.columns):
@@ -968,7 +1001,6 @@ def render_ai_block(show_map: bool = True):
         return
 
     row = dfp.iloc[0].to_dict()
-
     predicted_risk = str(row.get("predicted_risk", "UNKNOWN"))
     predicted_score = int(row.get("predicted_score", 0) or 0)
     signal_7d = float(row.get("signal_7d", 0) or 0)
@@ -1090,11 +1122,7 @@ def render_ai_block(show_map: bool = True):
         lon="longitude",
         size="predicted_score",
         hover_name="facility_name" if "facility_name" in dfm.columns else None,
-        hover_data={
-            c: True
-            for c in ["state", "lga", "predicted_risk", "predicted_score", "signal_7d", "confirmed_7d"]
-            if c in dfm.columns
-        },
+        hover_data={c: True for c in ["state", "lga", "predicted_risk", "predicted_score", "signal_7d", "confirmed_7d"] if c in dfm.columns},
         zoom=4.2,
         height=520,
     )
@@ -1136,7 +1164,8 @@ def parse_mutations(text: str) -> List[str]:
     if not text:
         return []
     raw = [x.strip() for x in text.replace("\n", ",").split(",")]
-    return [x for x in raw if x]
+    muts = [x for x in raw if x]
+    return muts
 
 
 def predict_resistance_from_mutations(muts: List[str]) -> Dict[str, Any]:
@@ -1235,13 +1264,24 @@ def page_ai_drug_resistance_predictor():
         return
 
     if dfr.empty:
-        st.info("No resistance records yet.")
+        st.info("No resistance records yet. Save some in the 'Drug Resistance' page or import GeneXpert with RIF resistance.")
         return
 
     if not is_organizer() and "facility_id" in dfr.columns:
-        dfr = dfr[dfr["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
+        dfr = dfr[dfr["facility_id"].astype(str) == str(facility_id)]
 
-    show_cols = [c for c in ["patient_id", "resistance_class", "test_method", "created_at", "notes", "facility_id"] if c in dfr.columns]
+    if is_organizer():
+        scope_state = st.session_state.get("org_scope_state")
+        if scope_state:
+            try:
+                df_fac = df_select("facilities", {"select": "facility_id,state,lga,facility_name", "limit": str(effective_limit())})
+                if not df_fac.empty and "state" in df_fac.columns:
+                    dfr = dfr.merge(df_fac, on="facility_id", how="left")
+                    dfr = dfr[dfr["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
+            except Exception:
+                pass
+
+    show_cols = [c for c in ["patient_id", "resistance_class", "test_method", "created_at", "notes", "facility_id", "facility_name", "state", "lga"] if c in dfr.columns]
     if "created_at" in dfr.columns:
         try:
             dfr2 = dfr[show_cols].copy()
@@ -1253,6 +1293,12 @@ def page_ai_drug_resistance_predictor():
     else:
         df_show(dfr[show_cols], hide_index=True)
 
+    st.subheader("Summary")
+    if "resistance_class" in dfr.columns:
+        summ = dfr["resistance_class"].fillna("UNKNOWN").value_counts().reset_index()
+        summ.columns = ["Resistance class", "Count"]
+        df_show(summ, hide_index=True)
+
 
 # =========================
 # PAGES
@@ -1261,10 +1307,8 @@ def page_home():
     render_topbar()
     section("Home")
     st.success("✅ Authenticated. RLS isolates data per facility. WHO Dashboard + GIS + Alerts enabled.")
+    st.write("Facility ID:", facility_id)
     st.write("Role:", st.session_state.get("role"))
-    st.write("Facility (session):", st.session_state.get("facility_id"))
-    if is_organizer():
-        st.write("Organizer write facility:", st.session_state.get("write_facility_id"))
 
     st.markdown("---")
     section("AI Outbreak Prediction")
@@ -1275,8 +1319,6 @@ def page_patients():
     render_topbar()
     section("Patients")
 
-    if is_organizer() and not get_write_facility_id():
-        st.warning("Organizer: select **Organizer Write Facility** in the sidebar before creating patients.")
     with st.expander("➕ Register new patient", expanded=True):
         full_name = st.text_input("Full name *")
         age = st.number_input("Age", 0, 120, 30)
@@ -1289,8 +1331,12 @@ def page_patients():
                 st.error("Full name required.")
                 st.stop()
 
+            if not facility_id:
+                st.error("facility_id is missing. Facility users should have it. Organizer must select facility context.")
+                st.stop()
+
             payload = {
-                "facility_id": get_write_facility_id(),  # ✅ ALWAYS non-null (or raises)
+                "facility_id": facility_id,
                 "full_name": full_name.strip(),
                 "age": int(age),
                 "sex": sex,
@@ -1310,17 +1356,10 @@ def page_patients():
         {"select": "*", "limit": str(effective_limit())},
         ["created_at.desc", "updated_at.desc", "patient_id.desc"],
     )
-
-    # Keep view tidy: facility users see own; organizer optionally filtered to write facility
-    if not is_organizer() and (not dfp.empty) and ("facility_id" in dfp.columns):
-        dfp = dfp[dfp["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
-    if is_organizer() and st.session_state.get("write_facility_id") and (not dfp.empty) and ("facility_id" in dfp.columns):
-        dfp = dfp[dfp["facility_id"].astype(str) == str(st.session_state.get("write_facility_id"))]
-
     dfl = _local_patients_df()
     if not dfl.empty:
         st.caption("Offline-created patients (local cache)")
-        df_show(dfl[["patient_id", "full_name", "created_at", "offline", "facility_id"]].copy(), hide_index=True)
+        df_show(dfl[["patient_id", "full_name", "created_at", "offline"]].copy(), hide_index=True)
 
     df_show(dfp, hide_index=True)
 
@@ -1341,12 +1380,14 @@ def page_diagnosis_events():
 
     st.markdown("### TB Screening Symptoms")
     col1, col2 = st.columns(2)
+
     with col1:
         sx_cough_2w = st.checkbox("Cough ≥ 2 weeks")
         sx_fever = st.checkbox("Fever")
         sx_night_sweats = st.checkbox("Night sweats")
         sx_weight_loss = st.checkbox("Weight loss")
         sx_hemoptysis = st.checkbox("Hemoptysis")
+
     with col2:
         sx_chest_pain = st.checkbox("Chest pain / breathlessness")
         rf_contact_tb = st.checkbox("Contact with TB case")
@@ -1356,11 +1397,13 @@ def page_diagnosis_events():
 
     st.markdown("### Comorbidities / Risk Factors")
     col3, col4 = st.columns(2)
+
     with col3:
         comorbid_hiv = st.checkbox("HIV positive")
         comorbid_diabetes = st.checkbox("Diabetes (comorbidity)")
         comorbid_malnutrition = st.checkbox("Malnutrition")
         comorbid_smoking = st.checkbox("Smoking")
+
     with col4:
         comorbid_alcohol = st.checkbox("Alcohol use")
         comorbid_ckd = st.checkbox("Chronic kidney disease (CKD)")
@@ -1427,8 +1470,8 @@ def page_diagnosis_events():
 
     if st.button("Save event", type="primary"):
         payload = {
-            "facility_id": get_write_facility_id(),  # ✅ always set
-            "patient_id": pid,  # may be OFFLINE-* and will be mapped during sync
+            "facility_id": facility_id,
+            "patient_id": pid,
             "tb_probability": float(tb_probability),
             "category": category,
             "genexpert": genexpert,
@@ -1471,12 +1514,6 @@ def page_diagnosis_events():
         {"select": "*", "limit": str(effective_limit())},
         ["timestamp.desc", "created_at.desc", "event_id.desc"],
     )
-
-    if not is_organizer() and (not dfe.empty) and ("facility_id" in dfe.columns):
-        dfe = dfe[dfe["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
-    if is_organizer() and st.session_state.get("write_facility_id") and (not dfe.empty) and ("facility_id" in dfe.columns):
-        dfe = dfe[dfe["facility_id"].astype(str) == str(st.session_state.get("write_facility_id"))]
-
     df_show(dfe, hide_index=True)
 
 
@@ -1493,7 +1530,7 @@ def page_dots():
 
     if st.button("Save DOTS", type="primary"):
         payload = {
-            "facility_id": get_write_facility_id(),
+            "facility_id": facility_id,
             "patient_id": pid,
             "date": date.isoformat(),
             "dose_taken": bool(dose_taken),
@@ -1513,11 +1550,7 @@ def page_dots():
             st.rerun()
         else:
             if "duplicate key" in r.text.lower() or r.status_code == 409:
-                match = {
-                    "facility_id": f"eq.{payload['facility_id']}",
-                    "patient_id": f"eq.{pid}",
-                    "date": f"eq.{date.isoformat()}",
-                }
+                match = {"facility_id": f"eq.{facility_id}", "patient_id": f"eq.{pid}", "date": f"eq.{date.isoformat()}"}
                 try:
                     patch_row("dots_daily", match, {"dose_taken": bool(dose_taken), "note": note.strip()})
                     st.success("Updated ✅")
@@ -1554,7 +1587,7 @@ def page_adherence():
     notes = st.text_area("Notes")
     if st.button("Save adherence snapshot", type="primary"):
         payload = {
-            "facility_id": get_write_facility_id(),
+            "facility_id": facility_id,
             "patient_id": pid,
             "missed_7": int(missed_7),
             "missed_28": int(missed_28),
@@ -1597,7 +1630,7 @@ def page_treatment():
 
     if st.button("Save treatment update", type="primary"):
         payload = {
-            "facility_id": get_write_facility_id(),
+            "facility_id": facility_id,
             "patient_id": pid,
             "start_date": start_date.isoformat(),
             "phase": phase,
@@ -1657,7 +1690,7 @@ def page_contact_tracing():
                 st.stop()
 
             payload = {
-                "facility_id": get_write_facility_id(),
+                "facility_id": facility_id,
                 "index_patient_id": pid,
                 "full_name": name.strip(),
                 "age": int(age),
@@ -1711,7 +1744,7 @@ def page_drug_resistance():
 
     if st.button("Save resistance record", type="primary"):
         payload = {
-            "facility_id": get_write_facility_id(),
+            "facility_id": facility_id,
             "patient_id": pid,
             "rifampicin_resistant": bool(rif),
             "isoniazid_resistant": bool(inh),
@@ -1785,7 +1818,7 @@ def page_genexpert_import():
                     outp = insert_row(
                         "patients",
                         {
-                            "facility_id": get_write_facility_id(),
+                            "facility_id": facility_id,
                             "full_name": full_name,
                             "age": int(age),
                             "sex": sex,
@@ -1801,7 +1834,7 @@ def page_genexpert_import():
                 insert_row(
                     "events",
                     {
-                        "facility_id": get_write_facility_id(),
+                        "facility_id": facility_id,
                         "patient_id": pid,
                         "tb_probability": 0.95 if mtb_detected else 0.10,
                         "category": category,
@@ -1820,7 +1853,7 @@ def page_genexpert_import():
                     insert_row(
                         "tb_drug_resistance",
                         {
-                            "facility_id": get_write_facility_id(),
+                            "facility_id": facility_id,
                             "patient_id": pid,
                             "rifampicin_resistant": True,
                             "isoniazid_resistant": False,
@@ -1849,7 +1882,7 @@ def page_who_dashboard():
 
     dfw = df_select("v_who_indicators_monthly", {"select": "*", "limit": str(effective_limit())})
     if dfw.empty:
-        st.info("No data yet.")
+        st.info("No data yet. Add diagnosis events or import GeneXpert.")
         return
 
     if "facility_id" not in dfw.columns:
@@ -1857,7 +1890,7 @@ def page_who_dashboard():
         st.stop()
 
     if not is_organizer():
-        dfw = dfw[dfw["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
+        dfw = dfw[dfw["facility_id"].astype(str) == str(facility_id)]
     else:
         scope_state = st.session_state.get("org_scope_state")
         if scope_state and ("state" in dfw.columns):
@@ -1903,7 +1936,7 @@ def page_gis_heatmap():
         return
 
     if (not is_organizer()) and ("facility_id" in dfm.columns):
-        dfm = dfm[dfm["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
+        dfm = dfm[dfm["facility_id"].astype(str) == str(facility_id)]
 
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")
@@ -1914,9 +1947,40 @@ def page_gis_heatmap():
     dfm["longitude"] = pd.to_numeric(dfm.get("longitude"), errors="coerce")
     dfm["confirmed_tb"] = pd.to_numeric(dfm.get("confirmed_tb"), errors="coerce").fillna(0).astype(int)
 
-    dff = dfm.dropna(subset=["latitude", "longitude"])
+    states = sorted([str(x) for x in dfm.get("state", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
+
+    col1, col2, col3 = st.columns(3)
+    scope_state = st.session_state.get("org_scope_state") if is_organizer() else None
+
+    with col1:
+        if scope_state:
+            state = scope_state
+            st.selectbox("State", [state], index=0, disabled=True)
+        else:
+            state = st.selectbox("State", ["All"] + states)
+
+    if state != "All" and "state" in dfm.columns:
+        lgas = sorted([str(x) for x in dfm[dfm["state"] == state].get("lga", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
+    else:
+        lgas = sorted([str(x) for x in dfm.get("lga", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
+
+    with col2:
+        lga = st.selectbox("LGA", ["All"] + lgas)
+
+    with col3:
+        min_cases = st.number_input("Min confirmed TB", 0, 100000, 0)
+
+    dff = dfm.copy()
+    if state != "All" and "state" in dff.columns:
+        dff = dff[dff["state"] == state]
+    if lga != "All" and "lga" in dff.columns:
+        dff = dff[dff["lga"] == lga]
+
+    dff = dff[dff["confirmed_tb"] >= int(min_cases)]
+    dff = dff.dropna(subset=["latitude", "longitude"])
+
     if dff.empty:
-        st.warning("No facilities with coordinates.")
+        st.warning("No facilities with coordinates match your filters.")
         return
 
     fig = px.density_mapbox(
@@ -1937,7 +2001,7 @@ def page_gis_heatmap():
 def page_outbreak_alerts():
     render_topbar()
     section("Outbreak Alerts")
-    st.caption("Uses v_hotspots view.")
+    st.caption("Uses v_hotspots view + tb_outbreak_alerts table (7d vs previous 28d).")
 
     try:
         dfh = df_select("v_hotspots", {"select": "*", "limit": str(effective_limit())})
@@ -1951,7 +2015,7 @@ def page_outbreak_alerts():
         return
 
     if not is_organizer() and "facility_id" in dfh.columns:
-        dfh = dfh[dfh["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
+        dfh = dfh[dfh["facility_id"].astype(str) == str(facility_id)]
 
     show_cols = [c for c in ["facility_name", "state", "lga", "confirmed_7d", "confirmed_prev_28d", "ratio", "hotspot_level"] if c in dfh.columns]
     st.subheader("Hotspot ranking (last 7 days)")
@@ -2083,8 +2147,21 @@ ROLE_PERMISSIONS = {
 
 allowed_pages = ROLE_PERMISSIONS.get(role, ROLE_PERMISSIONS["viewer"])
 menu = [f"{TB_ICON} {p}" for p in allowed_pages]
-page = st.sidebar.radio("Menu", menu)
+
+# Restore where user was after refresh
+last_page = (st.session_state.get("last_page") or "Home").strip()
+default_label = f"{TB_ICON} {last_page}"
+if default_label in menu:
+    default_index = menu.index(default_label)
+else:
+    default_index = 0
+
+page = st.sidebar.radio("Menu", menu, index=default_index)
 page_clean = page.replace(TB_ICON, "").strip()
+
+# Save last page to session + cookies (so refresh returns to same page)
+st.session_state["last_page"] = page_clean
+persist_session_to_cookies()
 
 # ============================================================
 # ROUTER
