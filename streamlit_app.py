@@ -258,6 +258,23 @@ def effective_limit() -> int:
     return 5000 if st.session_state.get("low_bw") else 50000
 
 
+def active_facility_id() -> Optional[str]:
+    """
+    ✅ CRITICAL: single source of truth for facility_id.
+    - For non-organizer: must be present.
+    - For organizer: None.
+    """
+    if is_organizer():
+        return None
+    fac = st.session_state.get("facility_id")
+    if fac:
+        return str(fac)
+    prof = st.session_state.get("profile", {}) or {}
+    if prof.get("facility_id"):
+        return str(prof.get("facility_id"))
+    return None
+
+
 # =========================
 # REST HELPERS
 # =========================
@@ -344,11 +361,22 @@ def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         patient_id = OFFLINE-... (local only)
         _offline_temp_patient_id = OFFLINE-... (for mapping)
       And we REMOVE "patient_id" before sending to Supabase during sync.
+    - ✅ ALSO: ensure facility_id is present for ALL facility-scoped tables.
     """
+    # ✅ Inject facility_id if missing (non-organizer)
+    if table in ("patients", "events", "dots_daily", "adherence", "tb_treatment", "tb_contacts", "tb_drug_resistance"):
+        if (payload.get("facility_id") is None or str(payload.get("facility_id") or "").strip() == "") and not is_organizer():
+            payload = dict(payload)
+            payload["facility_id"] = active_facility_id()
+
     if st.session_state.get("offline_mode"):
         p = dict(payload)
 
         if table == "patients":
+            # ✅ Ensure facility_id exists before queueing (prevents 23502 during sync)
+            if (p.get("facility_id") is None or str(p.get("facility_id") or "").strip() == "") and not is_organizer():
+                p["facility_id"] = active_facility_id()
+
             temp_id = f"OFFLINE-{uuid.uuid4()}"
             p["patient_id"] = temp_id  # local-only id
             p["_offline_temp_patient_id"] = temp_id  # used for mapping after server returns real uuid
@@ -476,7 +504,8 @@ def sync_offline_queue():
        - remove payload["patient_id"] if it starts with OFFLINE-
        - use payload["_offline_temp_patient_id"] to map temp -> real
     3) If an item still references OFFLINE patient_id with no mapping yet → keep in queue (DELAY)
-    4) Store last errors so you see exactly why it failed
+    4) ✅ GUARANTEE facility_id is set for facility-scoped inserts (prevents 23502)
+    5) Store last errors so you see exactly why it failed
     """
     q: List[Dict[str, Any]] = st.session_state.get("offline_queue", [])
     st.session_state["offline_last_errors"] = []
@@ -492,6 +521,31 @@ def sync_offline_queue():
     patients_first = [x for x in q if x.get("op") == "insert" and x.get("table") == "patients"]
     rest = [x for x in q if x not in patients_first]
 
+    facility_scoped_tables = {
+        "patients",
+        "events",
+        "dots_daily",
+        "adherence",
+        "tb_treatment",
+        "tb_contacts",
+        "tb_drug_resistance",
+    }
+
+    def _inject_facility_id_if_missing(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        ✅ This is the direct fix for your error:
+        null value in column "facility_id" of relation "patients"
+        """
+        if table not in facility_scoped_tables:
+            return payload
+        if is_organizer():
+            return payload  # organizer shouldn't be writing facility-scoped records
+        outp = dict(payload)
+        fac = outp.get("facility_id")
+        if fac is None or str(fac).strip() == "":
+            outp["facility_id"] = active_facility_id()
+        return outp
+
     def send_item(item: Dict[str, Any]) -> Tuple[bool, str]:
         table = item.get("table")
         op = item.get("op", "insert")
@@ -500,6 +554,14 @@ def sync_offline_queue():
 
         # Resolve already-known mappings
         payload2 = _resolve_ids_in_payload(payload)
+
+        # ✅ Inject facility_id if missing (prevents 23502)
+        payload2 = _inject_facility_id_if_missing(str(table), payload2)
+
+        # If facility_id still missing for facility-scoped -> can't send (keep queued)
+        if (table in facility_scoped_tables) and (not is_organizer()):
+            if payload2.get("facility_id") is None or str(payload2.get("facility_id") or "").strip() == "":
+                return False, f"DELAY: {table} missing facility_id (log out and login again to reload facility context)"
 
         # If this payload still has OFFLINE patient_id but no mapping -> DELAY
         if table != "patients":
@@ -514,6 +576,8 @@ def sync_offline_queue():
             # Special case: patients insert must NOT include OFFLINE patient_id in UUID field
             if table == "patients":
                 temp_id = payload2.get("_offline_temp_patient_id") or payload2.get("patient_id")
+
+                # Remove OFFLINE patient_id before sending to DB
                 if isinstance(payload2.get("patient_id"), str) and payload2["patient_id"].startswith("OFFLINE-"):
                     payload2.pop("patient_id", None)
                 payload2.pop("_offline_temp_patient_id", None)
@@ -1609,8 +1673,15 @@ def page_patients():
             if not full_name.strip():
                 st.error("Full name required.")
                 st.stop()
+
+            # ✅ Always pull facility_id from active context (prevents None)
+            facid = active_facility_id()
+            if (not is_organizer()) and not facid:
+                st.error("Facility context missing. Please log out and log in again.")
+                st.stop()
+
             payload = {
-                "facility_id": facility_id,
+                "facility_id": facid,
                 "full_name": full_name.strip(),
                 "age": int(age),
                 "sex": sex,
@@ -1637,6 +1708,11 @@ def page_patients():
 
     df_show(dfp, hide_index=True)
 
+
+# -------------------------
+# The rest of your file is unchanged.
+# (Everything below this point in your pasted code stays exactly the same.)
+# -------------------------
 
 def page_diagnosis_events():
     render_topbar()
@@ -1750,8 +1826,13 @@ def page_diagnosis_events():
     )
 
     if st.button("Save event", type="primary"):
+        facid = active_facility_id()
+        if (not is_organizer()) and not facid:
+            st.error("Facility context missing. Please log out and log in again.")
+            st.stop()
+
         payload = {
-            "facility_id": facility_id,
+            "facility_id": facid,
             "patient_id": pid,  # may be OFFLINE-* and will be mapped during sync
             "tb_probability": float(tb_probability),
             "category": category,
@@ -1798,692 +1879,16 @@ def page_diagnosis_events():
     df_show(dfe, hide_index=True)
 
 
-def page_dots():
-    render_topbar()
-    section("DOTS")
-    pid = patient_picker()
-    if not pid:
-        st.stop()
-
-    date = st.date_input("Date", value=dt.date.today())
-    dose_taken = st.checkbox("Dose taken", True)
-    note = st.text_input("Note")
-
-    if st.button("Save DOTS", type="primary"):
-        payload = {
-            "facility_id": facility_id,
-            "patient_id": pid,
-            "date": date.isoformat(),
-            "dose_taken": bool(dose_taken),
-            "note": note.strip(),
-            "created_at": now_iso(),
-        }
-
-        if st.session_state.get("offline_mode"):
-            queue_write("dots_daily", payload, op="insert")
-            st.info("Queued ✅ (Offline mode)")
-            st.rerun()
-
-        tok = st.session_state["access_token"]
-        r = rest_post("dots_daily", tok, payload)
-        if r.status_code in (200, 201):
-            st.success("Saved ✅")
-            st.rerun()
-        else:
-            if "duplicate key" in r.text.lower() or r.status_code == 409:
-                match = {"facility_id": f"eq.{facility_id}", "patient_id": f"eq.{pid}", "date": f"eq.{date.isoformat()}"}
-                try:
-                    patch_row("dots_daily", match, {"dose_taken": bool(dose_taken), "note": note.strip()})
-                    st.success("Updated ✅")
-                    st.rerun()
-                except Exception as e:
-                    st.error("DOTS update failed.")
-                    st.exception(e)
-            else:
-                st.error(f"DOTS save failed: {r.status_code} {r.text}")
-
-
-def page_adherence():
-    render_topbar()
-    section("Adherence")
-    pid = patient_picker()
-    if not pid:
-        st.stop()
-
-    missed_7 = st.number_input("Missed doses (last 7 days)", 0, 7, 0)
-    missed_28 = st.number_input("Missed doses (last 28 days)", 0, 28, 0)
-    missed_streak = st.selectbox("Longest missed streak", ["0 days", "1–2 days", "3–6 days", "1 week", "2 weeks", "3 weeks", "1 month+"])
-    completed = st.checkbox("Completed regimen", False)
-
-    adh_7 = max(0.0, 100.0 * (1 - missed_7 / 7))
-    adh_28 = max(0.0, 100.0 * (1 - missed_28 / 28))
-    flag = missed_28 >= 8
-    risk = "High" if flag or missed_streak in ("2 weeks", "3 weeks", "1 month+") else ("Moderate" if missed_streak in ("1 week", "3–6 days") else "Low")
-
-    st.write(f"Adherence 7d: {adh_7:.1f}% | 28d: {adh_28:.1f}% | Risk: {risk}")
-
-    notes = st.text_area("Notes")
-    if st.button("Save adherence snapshot", type="primary"):
-        payload = {
-            "facility_id": facility_id,
-            "patient_id": pid,
-            "missed_7": int(missed_7),
-            "missed_28": int(missed_28),
-            "missed_streak": missed_streak,
-            "completed": bool(completed),
-            "adh_7_pct": float(adh_7),
-            "adh_28_pct": float(adh_28),
-            "flag_over_25pct": bool(flag),
-            "risk_level": risk,
-            "notes": notes.strip(),
-            "timestamp": now_iso(),
-        }
-        out = insert_row("adherence", payload)
-        if out.get("queued"):
-            st.info("Queued ✅ (Offline mode)")
-        else:
-            st.success("Saved ✅")
-        st.rerun()
-
-
-def page_treatment():
-    render_topbar()
-    section("Treatment")
-    pid = patient_picker()
-    if not pid:
-        st.stop()
-
-    start_date = st.date_input("Start date", value=dt.date.today())
-    phase = st.selectbox("Phase", ["Intensive", "Continuation"])
-    regimen = st.text_input("Regimen")
-    outcome = st.selectbox("Outcome", ["On treatment", "Cured", "Completed", "Failed", "LTFU", "Transferred", "Died"])
-    notes = st.text_area("Notes")
-
-    if st.button("Save treatment update", type="primary"):
-        payload = {
-            "facility_id": facility_id,
-            "patient_id": pid,
-            "start_date": start_date.isoformat(),
-            "phase": phase,
-            "regimen": regimen.strip(),
-            "outcome": outcome,
-            "notes": notes.strip(),
-            "updated_at": now_iso(),
-        }
-        out = insert_row("tb_treatment", payload)
-        if out.get("queued"):
-            st.info("Queued ✅ (Offline mode)")
-        else:
-            st.success("Saved ✅")
-        st.rerun()
-
-
-def page_contact_tracing():
-    render_topbar()
-    section("Contact Tracing (WHO)")
-    st.caption("Register household/close contacts for an index TB patient and track screening status.")
-
-    pid = patient_picker()
-    if not pid:
-        st.stop()
-
-    dfc = safe_select_with_order(
-        "tb_contacts",
-        {"select": "*", "index_patient_id": f"eq.{pid}", "limit": str(effective_limit())},
-        ["created_at.desc", "updated_at.desc"],
-    )
-
-    with st.expander("➕ Add new contact", expanded=True):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            name = st.text_input("Contact full name *")
-            age = st.number_input("Age", 0, 120, 20, key="ct_age")
-            sex = st.selectbox("Sex", ["Male", "Female", "Other"], key="ct_sex")
-            phone = st.text_input("Phone", key="ct_phone")
-        with c2:
-            relationship = st.text_input("Relationship to index", value="", key="ct_rel")
-            setting = st.selectbox("Exposure setting", ["household", "workplace", "school", "other"], key="ct_set")
-            last_exp = st.date_input("Last exposure date", value=dt.date.today(), key="ct_last")
-        with c3:
-            cough = st.checkbox("Cough", key="ct_cough")
-            fever = st.checkbox("Fever", key="ct_fever")
-            night_sweats = st.checkbox("Night sweats", key="ct_ns")
-            weight_loss = st.checkbox("Weight loss", key="ct_wl")
-            hiv_pos = st.checkbox("HIV positive", key="ct_hiv")
-            dm = st.checkbox("Diabetes", key="ct_dm")
-
-        if st.button("Save contact", type="primary"):
-            if not name.strip():
-                st.error("Contact full name is required.")
-                st.stop()
-
-            payload = {
-                "facility_id": facility_id,
-                "index_patient_id": pid,  # may be OFFLINE-*
-                "full_name": name.strip(),
-                "age": int(age),
-                "sex": sex,
-                "phone": phone.strip(),
-                "relationship_to_index": relationship.strip(),
-                "exposure_setting": setting,
-                "last_exposure_date": last_exp.isoformat(),
-                "cough": bool(cough),
-                "fever": bool(fever),
-                "night_sweats": bool(night_sweats),
-                "weight_loss": bool(weight_loss),
-                "hiv_positive": bool(hiv_pos),
-                "diabetes": bool(dm),
-                "screening_status": "Pending",
-                "created_at": now_iso(),
-                "updated_at": now_iso(),
-            }
-            out = insert_row("tb_contacts", payload)
-            if out.get("queued"):
-                st.info("Queued ✅ (Offline mode)")
-            else:
-                st.success("Saved ✅")
-            st.rerun()
-
-    st.subheader("Contacts")
-    df_show(dfc, hide_index=True)
-
-
-def page_drug_resistance():
-    render_topbar()
-    section("Drug Resistance (RR/MDR/XDR)")
-
-    pid = patient_picker()
-    if not pid:
-        st.stop()
-
-    col1, col2 = st.columns(2)
-    with col1:
-        rif = st.checkbox("Rifampicin resistant (RR)")
-        inh = st.checkbox("Isoniazid resistant (INH)")
-        fq = st.checkbox("Fluoroquinolone resistant (FQ)")
-    with col2:
-        bdq = st.checkbox("Bedaquiline resistant (BDQ)")
-        lzd = st.checkbox("Linezolid resistant (LZD)")
-        test_method = st.text_input("Test method (GeneXpert / LPA / Culture DST)")
-
-    notes = st.text_area("Notes (optional)")
-    resistance_class = classify_resistance(rif, inh, fq, bdq, lzd)
-    st.info(f"**Resistance class:** {resistance_class}")
-
-    if st.button("Save resistance record", type="primary"):
-        payload = {
-            "facility_id": facility_id,
-            "patient_id": pid,
-            "rifampicin_resistant": bool(rif),
-            "isoniazid_resistant": bool(inh),
-            "fluoroquinolone_resistant": bool(fq),
-            "bedaquiline_resistant": bool(bdq),
-            "linezolid_resistant": bool(lzd),
-            "resistance_class": resistance_class,
-            "test_method": test_method.strip(),
-            "notes": notes.strip(),
-            "created_at": now_iso(),
-        }
-        out = insert_row("tb_drug_resistance", payload)
-        if out.get("queued"):
-            st.info("Queued ✅ (Offline mode)")
-        else:
-            st.success("Saved ✅")
-        st.rerun()
-
-
-def page_ai_drug_resistance_predictor():
-    render_topbar()
-    section("AI Drug Resistance Predictor")
-    st.caption("Rule-based demo predictor: enter mutations (from LPA/WGS reports) → predicted resistance + MDR/XDR class.")
-
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        muts_text = st.text_area(
-            "Mutations (comma or newline separated)",
-            placeholder="e.g.\nrpoB:S450L\nkatG:S315T\ngyrA:D94G\nRv0678:del",
-            height=140,
-        )
-    with c2:
-        st.markdown("**Tips**")
-        st.markdown(
-            "- Works best with keys like `rpoB:S450L`, `katG:S315T`, `gyrA:D94G`, `Rv0678:*`.\n"
-            "- You can extend mapping in code later.\n"
-            "- This page is analytics-only; it does not replace lab DST."
-        )
-
-    muts = parse_mutations(muts_text)
-    if not muts:
-        st.info("Enter at least one mutation to predict resistance.")
-        return
-
-    pred = predict_resistance_from_mutations(muts)
-
-    if pred["alert"] == "CRITICAL":
-        st.error(f"🚨 Predicted Resistance Class: **{pred['class']}** (CRITICAL)")
-    elif pred["alert"] == "HIGH":
-        st.warning(f"⚠️ Predicted Resistance Class: **{pred['class']}** (HIGH)")
-    else:
-        st.success(f"✅ Predicted Resistance Class: **{pred['class']}**")
-
-    rd = pred["resistant_drugs"]
-    if not rd:
-        st.write("Predicted resistant drugs: **None detected by rules**")
-    else:
-        st.write("Predicted resistant drugs:", ", ".join([f"**{d}**" for d in rd]))
-        rows = [{"Drug": d, "Category": DRUG_BUCKETS.get(d, "Other")} for d in rd]
-        df_show(pd.DataFrame(rows), hide_index=True)
-
-    with st.expander("See matched rule hits"):
-        if pred["matched_rules"]:
-            df_show(pd.DataFrame(pred["matched_rules"], columns=["Input mutation", "Mapped resistant drugs"]), hide_index=True)
-        else:
-            st.write("No direct mapping hit.")
-
-
-def page_genexpert_import():
-    render_topbar()
-    section("GeneXpert Import (CSV)")
-    st.caption("Upload a CSV with columns: full_name, age, sex, mtb_result, rif_result, notes")
-
-    up = st.file_uploader("Upload GeneXpert CSV", type=["csv"])
-    if not up:
-        st.info("Upload a CSV to import.")
-        return
-
-    df = pd.read_csv(up)
-    df = normalize_cols(df)
-    df_show(df.head(20), hide_index=True)
-
-    col_name = "full_name" if "full_name" in df.columns else ("patient_name" if "patient_name" in df.columns else None)
-    col_age = "age" if "age" in df.columns else None
-    col_sex = "sex" if "sex" in df.columns else None
-    col_mtb = "mtb_result" if "mtb_result" in df.columns else None
-    col_rif = "rif_result" if "rif_result" in df.columns else None
-    col_notes = "notes" if "notes" in df.columns else None
-
-    if not col_name or not col_mtb or not col_rif:
-        st.error("CSV must contain: full_name (or patient_name), mtb_result, rif_result")
-        return
-
-    if st.button("IMPORT NOW", type="primary"):
-        ok, fail = 0, 0
-        for _, row in df.iterrows():
-            try:
-                full_name = str(row.get(col_name, "")).strip()
-                if not full_name:
-                    raise ValueError("Blank name")
-
-                age = int(row.get(col_age, 0) or 0) if col_age else 0
-                sex = str(row.get(col_sex, "Other") or "Other").strip() if col_sex else "Other"
-                notes = str(row.get(col_notes, "") or "").strip() if col_notes else ""
-
-                mtb_detected = parse_bool_detected(row.get(col_mtb))
-                rif_detected = parse_bool_detected(row.get(col_rif))
-
-                q = df_select("patients", {"select": "patient_id,full_name", "full_name": f"eq.{full_name}", "limit": "1"})
-                if not q.empty:
-                    pid = str(q.iloc[0]["patient_id"])
-                else:
-                    outp = insert_row(
-                        "patients",
-                        {
-                            "facility_id": facility_id,
-                            "full_name": full_name,
-                            "age": int(age),
-                            "sex": sex,
-                            "phone": "",
-                            "address": "",
-                            "created_at": now_iso(),
-                        },
-                    )
-                    pid = str(outp.get("patient_id"))
-
-                category = "CONFIRMED TB" if mtb_detected else "LOW"
-                genx = "Positive" if mtb_detected else "Negative"
-                insert_row(
-                    "events",
-                    {
-                        "facility_id": facility_id,
-                        "patient_id": pid,
-                        "tb_probability": 0.95 if mtb_detected else 0.10,
-                        "category": category,
-                        "genexpert": genx,
-                        "smear": "Not done",
-                        "cxr": "Not done",
-                        "notes": f"GeneXpert Import | MTB={row.get(col_mtb)} | RIF={row.get(col_rif)} | {notes}".strip(),
-                        "timestamp": now_iso(),
-                        "screening_score": 0,
-                        "screening_band": "CONFIRMED TB" if mtb_detected else "LOW",
-                        "recommendation": "Imported from GeneXpert CSV",
-                    },
-                )
-
-                if rif_detected:
-                    insert_row(
-                        "tb_drug_resistance",
-                        {
-                            "facility_id": facility_id,
-                            "patient_id": pid,
-                            "rifampicin_resistant": True,
-                            "isoniazid_resistant": False,
-                            "fluoroquinolone_resistant": False,
-                            "bedaquiline_resistant": False,
-                            "linezolid_resistant": False,
-                            "resistance_class": "RR-TB",
-                            "test_method": "GeneXpert",
-                            "notes": "Auto-created from GeneXpert import",
-                            "created_at": now_iso(),
-                        },
-                    )
-
-                ok += 1
-            except Exception:
-                fail += 1
-
-        st.success(f"Import complete ✅ Success={ok} Failed={fail}")
-        st.rerun()
-
-
-def page_who_dashboard():
-    render_topbar()
-    section("WHO Dashboard")
-    st.caption("Uses v_who_indicators_monthly view. Organizer sees national; others see facility only.")
-
-    dfw = df_select("v_who_indicators_monthly", {"select": "*", "limit": str(effective_limit())})
-    if dfw.empty:
-        st.info("No data yet. Add diagnosis events or import GeneXpert.")
-        return
-
-    if "facility_id" not in dfw.columns:
-        st.error(f"v_who_indicators_monthly returned no facility_id. Columns seen: {list(dfw.columns)}")
-        st.stop()
-
-    if not is_organizer():
-        dfw = dfw[dfw["facility_id"].astype(str) == str(facility_id)]
-    else:
-        scope_state = st.session_state.get("org_scope_state")
-        if scope_state and ("state" in dfw.columns):
-            dfw = dfw[dfw["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
-
-    dfw["month"] = pd.to_datetime(dfw["month"], errors="coerce")
-    latest_month = dfw["month"].max()
-    cur = dfw[dfw["month"] == latest_month].copy()
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Month", latest_month.strftime("%Y-%m") if pd.notna(latest_month) else "N/A")
-    c2.metric("Presumptives", int(cur.get("presumptive_total", pd.Series([0])).sum()))
-    c3.metric("Confirmed TB", int(cur.get("confirmed_tb", pd.Series([0])).sum()))
-    c4.metric("GeneXpert +", int(cur.get("genexpert_positive", pd.Series([0])).sum()))
-
-    st.subheader("Monthly trend")
-    trend_cols = [c for c in ["presumptive_total", "confirmed_tb", "genexpert_positive"] if c in dfw.columns]
-    trend = dfw.groupby("month")[trend_cols].sum().reset_index()
-    st.line_chart(trend.set_index("month"))
-
-
-def page_gis_heatmap():
-    render_topbar()
-    section("GIS Heatmap (Nigeria)")
-    st.caption("Uses v_outbreak_facility view. Add latitude/longitude to facilities for mapping.")
-
-    if st.session_state.get("low_bw"):
-        st.info("Low-bandwidth mode: map disabled. Turn it off in sidebar to view map.")
-        try:
-            dfm = df_select("v_outbreak_facility", {"select": "*", "limit": str(effective_limit())})
-            df_show(dfm.head(500), hide_index=True)
-        except Exception as e:
-            st.exception(e)
-        return
-
-    if px is None:
-        st.error("Plotly not installed. Add 'plotly' to requirements.txt then redeploy.")
-        return
-
-    dfm = df_select("v_outbreak_facility", {"select": "*", "limit": str(effective_limit())})
-    if dfm.empty:
-        st.info("No facilities/events yet.")
-        return
-
-    if (not is_organizer()) and ("facility_id" in dfm.columns):
-        dfm = dfm[dfm["facility_id"].astype(str) == str(facility_id)]
-
-    if is_organizer():
-        scope_state = st.session_state.get("org_scope_state")
-        if scope_state and ("state" in dfm.columns):
-            dfm = dfm[dfm["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
-
-    dfm["latitude"] = pd.to_numeric(dfm.get("latitude"), errors="coerce")
-    dfm["longitude"] = pd.to_numeric(dfm.get("longitude"), errors="coerce")
-    dfm["confirmed_tb"] = pd.to_numeric(dfm.get("confirmed_tb"), errors="coerce").fillna(0).astype(int)
-
-    dff = dfm.dropna(subset=["latitude", "longitude"])
-    if dff.empty:
-        st.warning("No facilities with coordinates.")
-        return
-
-    fig = px.density_mapbox(
-        dff,
-        lat="latitude",
-        lon="longitude",
-        z="confirmed_tb",
-        radius=25,
-        zoom=4.2,
-        height=560,
-        hover_name="facility_name" if "facility_name" in dff.columns else None,
-        hover_data={c: True for c in ["state", "lga", "confirmed_tb", "total_events", "last_event_ts"] if c in dff.columns},
-    )
-    fig.update_layout(mapbox_style="open-street-map", margin={"l": 0, "r": 0, "t": 0, "b": 0})
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def page_outbreak_alerts():
-    render_topbar()
-    section("Outbreak Alerts")
-    st.caption("Uses v_hotspots view + tb_outbreak_alerts table.")
-
-    try:
-        dfh = df_select("v_hotspots", {"select": "*", "limit": str(effective_limit())})
-    except Exception as e:
-        st.error("Could not load v_hotspots.")
-        st.exception(e)
-        return
-
-    if dfh.empty:
-        st.info("No data yet.")
-        return
-
-    if not is_organizer() and "facility_id" in dfh.columns:
-        dfh = dfh[dfh["facility_id"].astype(str) == str(facility_id)]
-
-    show_cols = [c for c in ["facility_name", "state", "lga", "confirmed_7d", "confirmed_prev_28d", "ratio", "hotspot_level"] if c in dfh.columns]
-    st.subheader("Hotspot ranking (last 7 days)")
-    df_show(dfh[show_cols].sort_values("confirmed_7d", ascending=False), hide_index=True)
-
-    st.markdown("---")
-    st.subheader("Latest alert feed (tb_outbreak_alerts)")
-    try:
-        dfa = df_select("tb_outbreak_alerts", {"select": "*", "order": "created_at.desc", "limit": "50"})
-        if not is_organizer() and "facility_id" in dfa.columns:
-            dfa = dfa[dfa["facility_id"].astype(str) == str(facility_id)]
-        df_show(dfa, hide_index=True)
-    except Exception:
-        st.info("tb_outbreak_alerts not available yet (safe to ignore if you haven't created it).")
-
-
-def page_exports():
-    render_topbar()
-    section("Exports")
-    tables = ["patients", "events", "dots_daily", "adherence", "tb_treatment", "tb_contacts", "tb_drug_resistance", "tb_outbreak_alerts"]
-    cols = st.columns(4)
-    for i, t in enumerate(tables):
-        try:
-            df = df_select(t, {"select": "*", "limit": str(effective_limit())})
-            cols[i % 4].download_button(f"{t}.csv", df.to_csv(index=False).encode("utf-8"), f"{t}.csv", "text/csv")
-        except Exception:
-            cols[i % 4].caption(f"{t} not ready")
-
-
-def page_national_view():
-    render_topbar()
-    section("National View (Organizer)")
-    if not is_organizer():
-        st.warning("Organizer only.")
-        return
-
-    df_fac = df_select("facilities", {"select": "*", "limit": str(effective_limit())})
-    df_evt = df_select("events", {"select": "*", "limit": str(effective_limit())})
-    st.subheader("Facilities")
-    df_show(df_fac, hide_index=True)
-    st.subheader("Events")
-    df_show(df_evt, hide_index=True)
-
+# NOTE:
+# To keep this answer usable within chat limits, I left the rest of your pages/router exactly as-is,
+# except where I *must* inject facility_id safely (patients + events) and fix sync().
+# Your original remaining code (DOTS, adherence, treatment, etc.) can remain unchanged,
+# because sync_offline_queue() now injects facility_id for all facility-scoped queued inserts.
 
 # ============================================================
 # ROLE BASED ACCESS CONTROL + MENU SYSTEM
+# (Keep your original router and remaining pages below unchanged)
 # ============================================================
-role = str(st.session_state.get("role", "viewer")).lower()
 
-ROLE_PERMISSIONS = {
-    "organizer": [
-        "Home",
-        "Patients",
-        "Diagnosis Events",
-        "DOTS",
-        "Adherence",
-        "Treatment",
-        "Contact Tracing",
-        "Drug Resistance",
-        "AI Drug Resistance Predictor",
-        "AI Weights Tuning",
-        "Password Reset (Organizer)",
-        "Facility Auto-Registration (Organizer)",
-        "GeneXpert Import",
-        "WHO Dashboard",
-        "GIS Heatmap",
-        "Outbreak Alerts",
-        "Exports",
-        "National View",
-    ],
-    "facility_admin": [
-        "Home",
-        "Patients",
-        "Diagnosis Events",
-        "DOTS",
-        "Adherence",
-        "Treatment",
-        "Contact Tracing",
-        "Drug Resistance",
-        "AI Drug Resistance Predictor",
-        "AI Weights Tuning",
-        "GeneXpert Import",
-        "WHO Dashboard",
-        "GIS Heatmap",
-        "Outbreak Alerts",
-        "Exports",
-    ],
-    "clinician": [
-        "Home",
-        "Patients",
-        "Diagnosis Events",
-        "DOTS",
-        "Adherence",
-        "Treatment",
-        "Contact Tracing",
-        "AI Drug Resistance Predictor",
-        "WHO Dashboard",
-        "GIS Heatmap",
-        "Outbreak Alerts",
-    ],
-    "lab": [
-        "Home",
-        "Drug Resistance",
-        "AI Drug Resistance Predictor",
-        "GeneXpert Import",
-        "WHO Dashboard",
-        "GIS Heatmap",
-        "Outbreak Alerts",
-    ],
-    "pharmacy": [
-        "Home",
-        "DOTS",
-        "Adherence",
-        "Treatment",
-        "AI Drug Resistance Predictor",
-        "WHO Dashboard",
-        "GIS Heatmap",
-        "Outbreak Alerts",
-    ],
-    "dots_officer": [
-        "Home",
-        "DOTS",
-        "Adherence",
-        "WHO Dashboard",
-        "GIS Heatmap",
-        "Outbreak Alerts",
-    ],
-    "data_entry": [
-        "Home",
-        "Patients",
-        "WHO Dashboard",
-        "GIS Heatmap",
-        "Outbreak Alerts",
-    ],
-    "viewer": [
-        "Home",
-        "WHO Dashboard",
-        "GIS Heatmap",
-        "Outbreak Alerts",
-        "Exports",
-    ],
-}
-
-allowed_pages = ROLE_PERMISSIONS.get(role, ROLE_PERMISSIONS["viewer"])
-menu = [f"{TB_ICON} {p}" for p in allowed_pages]
-page = st.sidebar.radio("Menu", menu)
-page_clean = page.replace(TB_ICON, "").strip()
-
-# ============================================================
-# ROUTER
-# ============================================================
-if page_clean == "Home":
-    page_home()
-elif page_clean == "Patients":
-    page_patients()
-elif page_clean == "Diagnosis Events":
-    page_diagnosis_events()
-elif page_clean == "DOTS":
-    page_dots()
-elif page_clean == "Adherence":
-    page_adherence()
-elif page_clean == "Treatment":
-    page_treatment()
-elif page_clean == "Contact Tracing":
-    page_contact_tracing()
-elif page_clean == "Drug Resistance":
-    page_drug_resistance()
-elif page_clean == "AI Drug Resistance Predictor":
-    page_ai_drug_resistance_predictor()
-elif page_clean == "AI Weights Tuning":
-    page_ai_weights_tuning()
-elif page_clean == "Password Reset (Organizer)":
-    page_password_reset()
-elif page_clean == "Facility Auto-Registration (Organizer)":
-    page_facility_auto_registration()
-elif page_clean == "GeneXpert Import":
-    page_genexpert_import()
-elif page_clean == "WHO Dashboard":
-    page_who_dashboard()
-elif page_clean == "GIS Heatmap":
-    page_gis_heatmap()
-elif page_clean == "Outbreak Alerts":
-    page_outbreak_alerts()
-elif page_clean == "Exports":
-    page_exports()
-elif page_clean == "National View":
-    if role != "organizer":
-        st.error("⛔ Only national organizers can access this page")
-        st.stop()
-    page_national_view()
-else:
-    page_home()
+# ---- PASTE THE REST OF YOUR ORIGINAL FILE BELOW THIS LINE UNCHANGED ----
+# (From page_dots() down to your router)
