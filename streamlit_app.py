@@ -1,8 +1,5 @@
 import os
 import uuid
-import base64
-import hashlib
-import hmac
 import datetime as dt
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -14,13 +11,6 @@ try:
     import plotly.express as px
 except Exception:
     px = None
-
-# Optional: auto-refresh helper (if installed)
-try:
-    from streamlit_autorefresh import st_autorefresh  # type: ignore
-except Exception:
-    st_autorefresh = None  # fallback to manual refresh
-
 
 # ============================================================
 # BRANDING (OHIH-TB) + NATIONAL DASHBOARD LOOK
@@ -146,8 +136,8 @@ def section(title: str):
 # ============================================================
 def df_show(df, **kwargs):
     """
-    Streamlit Cloud warning fix for st.dataframe:
-    - use_container_width is deprecated, use width="stretch".
+    Streamlit Cloud warning fix:
+    - use_container_width is deprecated for st.dataframe, use width="stretch".
     """
     kwargs.pop("use_container_width", None)
     kwargs.setdefault("width", "stretch")
@@ -169,8 +159,7 @@ def safe_secret(name: str, default: str = "") -> str:
 SUPABASE_URL = safe_secret("SUPABASE_URL", "").strip()
 SUPABASE_ANON_KEY = safe_secret("SUPABASE_ANON_KEY", "").strip()
 
-# Organizer reset key (set this in Streamlit Secrets):
-# ORGANIZER_RESET_KEY = "YOUR_STRONG_SECRET"
+# Optional: used by Password Reset page (your SQL function should validate this)
 ORGANIZER_RESET_KEY = safe_secret("ORGANIZER_RESET_KEY", "").strip()
 
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
@@ -188,6 +177,29 @@ def now_iso() -> str:
 # =========================
 # SESSION
 # =========================
+DEFAULT_AI_WEIGHTS = {
+    "sx_cough_2w": 3,
+    "sx_fever": 1,
+    "sx_night_sweats": 1,
+    "sx_weight_loss": 1,
+    "sx_hemoptysis": 3,
+    "sx_chest_pain": 1,
+    "rf_contact_tb": 2,
+    "rf_prev_tb": 1,
+    "rf_diabetes": 1,
+    "rf_malnutrition": 1,
+    "comorbid_hiv": 2,
+    "comorbid_diabetes": 1,
+    "comorbid_malnutrition": 1,
+    "comorbid_smoking": 0,
+    "comorbid_alcohol": 0,
+    "comorbid_ckd": 1,
+    "comorbid_copd": 1,
+    "comorbid_cancer": 1,
+    "comorbid_immunosuppressed": 1,
+}
+
+
 def ss_init():
     st.session_state.setdefault("org_scope", "National")
     st.session_state.setdefault("org_scope_state", None)  # None = national
@@ -215,11 +227,13 @@ def ss_init():
     # last sync errors for debugging
     st.session_state.setdefault("offline_last_errors", [])  # List[str]
 
-    # 🔔 Real-time alerts (client-side polling)
-    st.session_state.setdefault("alerts_enabled", True)
-    st.session_state.setdefault("alerts_interval_sec", 20)  # auto-refresh interval
-    st.session_state.setdefault("alerts_last_seen_ts", None)  # ISO string
-    st.session_state.setdefault("alerts_seen_ids", set())  # type: ignore
+    # Outbreak alerts notifications
+    st.session_state.setdefault("last_alert_seen_ts", None)  # iso str or None
+    st.session_state.setdefault("enable_live_alerts", False)
+
+    # AI scoring weights (tunable)
+    st.session_state.setdefault("ai_weights", dict(DEFAULT_AI_WEIGHTS))
+    st.session_state.setdefault("ai_weights_loaded", False)
 
 
 ss_init()
@@ -237,7 +251,7 @@ def logout():
 
 
 def is_organizer() -> bool:
-    return st.session_state.get("role") == "organizer"
+    return str(st.session_state.get("role", "")).lower() == "organizer"
 
 
 def effective_limit() -> int:
@@ -273,6 +287,18 @@ def rest_patch(table: str, access_token: str, match_params: Dict[str, str], payl
     return requests.patch(url, headers=h, params=match_params, json=payload, timeout=30)
 
 
+def rpc_call(fn_name: str, access_token: str, payload: Dict[str, Any]) -> requests.Response:
+    """
+    Supabase RPC call:
+      POST /rest/v1/rpc/<fn_name>
+    Your SQL function must exist, and should validate role + organizer_key if needed.
+    """
+    url = f"{REST_BASE}/rpc/{fn_name}"
+    h = rest_headers(access_token)
+    h["Prefer"] = "return=representation"
+    return requests.post(url, headers=h, json=payload, timeout=30)
+
+
 def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
@@ -287,20 +313,13 @@ def df_select(table: str, params: Dict[str, str]) -> pd.DataFrame:
     return _clean_df(pd.DataFrame(r.json() or []))
 
 
-def queue_write(
-    table: str,
-    payload: Dict[str, Any],
-    op: str = "insert",
-    match_params: Optional[Dict[str, str]] = None,
-    meta: Optional[Dict[str, Any]] = None,
-):
+def queue_write(table: str, payload: Dict[str, Any], op: str = "insert", match_params: Optional[Dict[str, str]] = None):
     item = {
         "queued_at": now_iso(),
         "op": op,  # "insert" or "patch"
         "table": table,
         "payload": payload,
         "match_params": match_params or {},
-        "meta": meta or {},
     }
     st.session_state["offline_queue"].append(item)
 
@@ -319,21 +338,20 @@ def _resolve_ids_in_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Offline behavior (robust for UUID primary keys):
-    - For patients:
-        * Create temp OFFLINE id for UI pickers
-        * DO NOT send patient_id to DB (avoids UUID error)
-        * Store temp id in queue meta so we can map to real uuid returned by DB
-    - For other tables:
-        * Queue normally; if patient_id/index_patient_id is OFFLINE it will be mapped during sync
+    Offline rules (CRITICAL FIX):
+    - If table == "patients", DO NOT send OFFLINE-* into UUID column.
+      We store:
+        patient_id = OFFLINE-... (local only)
+        _offline_temp_patient_id = OFFLINE-... (for mapping)
+      And we REMOVE "patient_id" before sending to Supabase during sync.
     """
     if st.session_state.get("offline_mode"):
         p = dict(payload)
-        meta: Dict[str, Any] = {}
 
         if table == "patients":
             temp_id = f"OFFLINE-{uuid.uuid4()}"
-            meta["temp_patient_id"] = temp_id
+            p["patient_id"] = temp_id  # local-only id
+            p["_offline_temp_patient_id"] = temp_id  # used for mapping after server returns real uuid
 
             st.session_state["local_patients"].append(
                 {
@@ -349,10 +367,8 @@ def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 }
             )
 
-            p.pop("patient_id", None)
-
-        queue_write(table, p, op="insert", meta=meta)
-        return {"queued": True, "table": table, "queued_at": now_iso(), "meta": meta}
+        queue_write(table, p, op="insert")
+        return {"queued": True, "table": table, "queued_at": now_iso()}
 
     # Online
     tok = st.session_state["access_token"]
@@ -436,7 +452,7 @@ def load_facility(facility_id: str) -> Dict[str, Any]:
 
 
 # =========================
-# UI: Organizer scope + Offline/Low-BW + Alerts
+# UI: Organizer scope + Offline/Low-BW
 # =========================
 def org_scope_ui():
     if st.session_state.get("role") != "organizer":
@@ -454,11 +470,13 @@ def org_scope_ui():
 
 def sync_offline_queue():
     """
-    Offline Sync (robust for UUID PKs):
+    Offline sync (CRITICAL FIXES):
     1) PATIENTS sync first (FK dependencies)
-    2) Does NOT send OFFLINE-* into uuid columns; DB generates uuid
-    3) Maps OFFLINE-* temp patient_id -> real uuid returned by Supabase
-    4) Delays items that reference OFFLINE ids until mapping exists
+    2) NEVER send OFFLINE-* into UUID columns:
+       - remove payload["patient_id"] if it starts with OFFLINE-
+       - use payload["_offline_temp_patient_id"] to map temp -> real
+    3) If an item still references OFFLINE patient_id with no mapping yet → keep in queue (DELAY)
+    4) Store last errors so you see exactly why it failed
     """
     q: List[Dict[str, Any]] = st.session_state.get("offline_queue", [])
     st.session_state["offline_last_errors"] = []
@@ -474,40 +492,37 @@ def sync_offline_queue():
     patients_first = [x for x in q if x.get("op") == "insert" and x.get("table") == "patients"]
     rest = [x for x in q if x not in patients_first]
 
-    mp: Dict[str, str] = st.session_state.get("id_map", {}) or {}
-
-    def _needs_mapping(payload: Dict[str, Any]) -> Optional[str]:
-        for k in ("patient_id", "index_patient_id"):
-            v = payload.get(k)
-            if isinstance(v, str) and v.startswith("OFFLINE-") and v not in mp:
-                return f"{k}={v}"
-        return None
-
     def send_item(item: Dict[str, Any]) -> Tuple[bool, str]:
         table = item.get("table")
         op = item.get("op", "insert")
         payload = item.get("payload", {}) or {}
         match_params = item.get("match_params", {}) or {}
-        meta = item.get("meta", {}) or {}
 
-        if table != "patients":
-            need = _needs_mapping(payload)
-            if need:
-                return False, f"DELAY: {table} requires mapping for {need}"
-
+        # Resolve already-known mappings
         payload2 = _resolve_ids_in_payload(payload)
 
+        # If this payload still has OFFLINE patient_id but no mapping -> DELAY
+        if table != "patients":
+            for fk in ["patient_id", "index_patient_id"]:
+                v = payload2.get(fk)
+                if isinstance(v, str) and v.startswith("OFFLINE-"):
+                    mp = st.session_state.get("id_map", {}) or {}
+                    if v not in mp:
+                        return False, f"DELAY: {table} requires mapping for {fk}={v}"
+
         if op == "insert":
+            # Special case: patients insert must NOT include OFFLINE patient_id in UUID field
             if table == "patients":
-                payload2 = dict(payload2)
-                payload2.pop("patient_id", None)
+                temp_id = payload2.get("_offline_temp_patient_id") or payload2.get("patient_id")
+                if isinstance(payload2.get("patient_id"), str) and payload2["patient_id"].startswith("OFFLINE-"):
+                    payload2.pop("patient_id", None)
+                payload2.pop("_offline_temp_patient_id", None)
 
-            r = rest_post(table, tok, payload2)
-            if r.status_code not in (200, 201):
-                return False, f"{table} insert failed: {r.status_code} {r.text}"
+                r = rest_post(table, tok, payload2)
+                if r.status_code not in (200, 201):
+                    return False, f"{table} insert failed: {r.status_code} {r.text}"
 
-            if table == "patients":
-                temp_id = meta.get("temp_patient_id")
+                # Capture returned real uuid and map it
                 try:
                     rows = r.json() or []
                     if isinstance(rows, list) and rows:
@@ -519,20 +534,24 @@ def sync_offline_queue():
                 except Exception:
                     pass
 
+                return True, ""
+
+            # Normal insert
+            r = rest_post(table, tok, payload2)
+            if r.status_code not in (200, 201):
+                return False, f"{table} insert failed: {r.status_code} {r.text}"
             return True, ""
 
         if op == "patch":
+            # Resolve ids in match_params too
             match2 = dict(match_params)
-            mp2 = st.session_state.get("id_map", {}) or {}
+            mp = st.session_state.get("id_map", {}) or {}
             for k, v in list(match2.items()):
                 if isinstance(v, str) and v.startswith("eq.OFFLINE-"):
                     tid = v.replace("eq.", "")
-                    if tid in mp2:
-                        match2[k] = f"eq.{mp2[tid]}"
-                    else:
-                        return False, f"DELAY: {table} missing mapping for patch match={tid}"
+                    if tid in mp:
+                        match2[k] = f"eq.{mp[tid]}"
 
-            payload2 = _resolve_ids_in_payload(payload2)
             r = rest_patch(table, tok, match2, payload2)
             if r.status_code not in (200, 204):
                 return False, f"{table} patch failed: {r.status_code} {r.text}"
@@ -540,6 +559,7 @@ def sync_offline_queue():
 
         return False, f"Unknown op: {op}"
 
+    # Pass 1: patients inserts
     for item in patients_first:
         try:
             ok_flag, err = send_item(item)
@@ -554,6 +574,7 @@ def sync_offline_queue():
             remaining.append(item)
             st.session_state["offline_last_errors"].append(f"patients insert exception: {e}")
 
+    # Pass 2: everything else
     for item in rest:
         try:
             ok_flag, err = send_item(item)
@@ -568,24 +589,29 @@ def sync_offline_queue():
             remaining.append(item)
             st.session_state["offline_last_errors"].append(f"{item.get('table')} exception: {e}")
 
+    # Remove local patients that have been mapped (cleanup)
     if st.session_state.get("id_map"):
         mapped = set(st.session_state["id_map"].keys())
-        st.session_state["local_patients"] = [p for p in st.session_state["local_patients"] if p.get("patient_id") not in mapped]
+        st.session_state["local_patients"] = [
+            p for p in st.session_state["local_patients"] if p.get("patient_id") not in mapped
+        ]
 
     st.session_state["offline_queue"] = remaining
 
     if fail == 0:
         st.success(f"Sync complete ✅ Sent={ok}, Failed={fail}")
     else:
-        st.warning(f"Sync complete (partial) ⚠️ Sent={ok}, Failed/Delayed={fail} (kept in queue)")
-        with st.expander("Why did sync fail/delay? (show errors)"):
-            for e in st.session_state.get("offline_last_errors", [])[:30]:
+        st.warning(f"Sync complete (partial) ⚠️ Sent={ok}, Failed={fail} (kept in queue)")
+        with st.expander("Why did sync fail? (show errors)"):
+            for e in st.session_state.get("offline_last_errors", [])[:50]:
                 st.write("•", e)
 
 
 def offline_lowbw_ui():
     st.sidebar.markdown("### ⚙️ Performance / Offline")
-    st.session_state["low_bw"] = st.sidebar.toggle("Low-bandwidth mode", value=st.session_state.get("low_bw", False))
+    st.session_state["low_bw"] = st.sidebar.toggle(
+        "Low-bandwidth mode", value=st.session_state.get("low_bw", False)
+    )
     st.session_state["offline_mode"] = st.sidebar.toggle(
         "Offline mode (queue writes)", value=st.session_state.get("offline_mode", False)
     )
@@ -597,248 +623,151 @@ def offline_lowbw_ui():
         if qn == 0:
             st.write("No queued actions.")
         else:
-            st.write("Queued actions will be sent when you click **Sync now** (or disable offline mode).")
+            st.write("Queued actions will be sent when you click **Sync now**.")
             if st.button("Sync now", key="sync_now"):
                 sync_offline_queue()
 
 
-def alerts_ui():
-    st.sidebar.markdown("### 🔔 Real-time Alerts")
-    st.session_state["alerts_enabled"] = st.sidebar.toggle(
-        "Enable outbreak notifications", value=bool(st.session_state.get("alerts_enabled", True))
-    )
-    st.session_state["alerts_interval_sec"] = int(
-        st.sidebar.slider("Auto-refresh interval (seconds)", 10, 120, int(st.session_state.get("alerts_interval_sec", 20)), 5)
-    )
+# =========================
+# AI WEIGHTS: LOAD/SAVE (optional DB integration)
+# =========================
+def try_load_ai_weights_from_db() -> None:
+    """
+    Optional: If you create a table/view to store weights, this will auto-load.
+    Expected table example: ai_scoring_weights(scope text, key text, weight int, updated_at timestamptz)
+    - scope: 'global' (recommended) or state/facility scope if you extend later
+    """
+    if st.session_state.get("ai_weights_loaded"):
+        return
 
-    if st_autorefresh is None:
-        st.sidebar.caption("Auto-refresh helper not installed → use manual refresh or any click to update alerts.")
-    else:
-        st.sidebar.caption("Auto-refresh enabled when notifications are ON.")
+    try:
+        dfw = df_select(
+            "ai_scoring_weights",
+            {"select": "key,weight,scope", "scope": "eq.global", "limit": "200"},
+        )
+        if not dfw.empty and "key" in dfw.columns and "weight" in dfw.columns:
+            weights = dict(DEFAULT_AI_WEIGHTS)
+            for _, row in dfw.iterrows():
+                k = str(row.get("key", "")).strip()
+                if not k:
+                    continue
+                try:
+                    weights[k] = int(row.get("weight", weights.get(k, 0)) or 0)
+                except Exception:
+                    pass
+            st.session_state["ai_weights"] = weights
+    except Exception:
+        # If table doesn't exist yet, ignore silently
+        pass
+
+    st.session_state["ai_weights_loaded"] = True
+
+
+def try_save_ai_weights_to_db(weights: Dict[str, int]) -> Tuple[bool, str]:
+    """
+    Optional save. If your DB doesn't have ai_scoring_weights yet, this will fail gracefully.
+    This uses UPSERT-like behavior by inserting rows; you can enforce unique(scope,key) on DB side.
+    """
+    try:
+        tok = st.session_state["access_token"]
+        rows = [{"scope": "global", "key": k, "weight": int(v), "updated_at": now_iso()} for k, v in weights.items()]
+        # If you created unique(scope,key), Supabase can upsert via Prefer: resolution=merge-duplicates
+        url = f"{REST_BASE}/ai_scoring_weights"
+        h = rest_headers(tok)
+        h["Prefer"] = "return=representation,resolution=merge-duplicates"
+        r = requests.post(url, headers=h, json=rows, timeout=30)
+        if r.status_code not in (200, 201):
+            return False, f"{r.status_code} {r.text}"
+        return True, "Saved to ai_scoring_weights"
+    except Exception as e:
+        return False, str(e)
 
 
 # =========================
-# 🔔 REAL-TIME ALERTS (toast + panel)
+# OUTBREAK ALERTS: NOTIFIER
 # =========================
-def _safe_toast(msg: str, icon: str = "🔔"):
-    try:
-        st.toast(msg, icon=icon)  # available in modern Streamlit
-    except Exception:
-        # fallback: do nothing
-        pass
-
-
-def _parse_dt_any(x) -> Optional[dt.datetime]:
-    try:
-        if x is None:
-            return None
-        return pd.to_datetime(x, utc=True, errors="coerce").to_pydatetime()
-    except Exception:
-        return None
-
-
-def fetch_alerts_df() -> pd.DataFrame:
+def fetch_new_outbreak_alerts() -> List[Dict[str, Any]]:
     """
-    Primary source: tb_outbreak_alerts (if you have it)
-    Fallback: v_hotspots (if alerts table doesn't exist)
-    Returns a normalized dataframe with:
-      alert_time, facility_id, facility_name, state, lga, level, confirmed_7d, ratio, message, source_id
+    Reads tb_outbreak_alerts (or a view) and returns rows newer than last seen.
+    You can change select columns to match your table schema.
     """
-    # Try table first
     try:
-        dfa = df_select("tb_outbreak_alerts", {"select": "*", "limit": str(effective_limit()), "order": "created_at.desc"})
-        if not dfa.empty:
-            # Normalize best-effort
-            # Determine time column
-            time_col = "created_at" if "created_at" in dfa.columns else ("alert_time" if "alert_time" in dfa.columns else None)
-            if time_col is None:
-                dfa["created_at"] = now_iso()
-                time_col = "created_at"
-
-            # Normalize fields
-            out = pd.DataFrame()
-            out["alert_time"] = pd.to_datetime(dfa[time_col], errors="coerce", utc=True)
-            out["facility_id"] = dfa["facility_id"] if "facility_id" in dfa.columns else None
-            out["facility_name"] = dfa["facility_name"] if "facility_name" in dfa.columns else None
-            out["state"] = dfa["state"] if "state" in dfa.columns else None
-            out["lga"] = dfa["lga"] if "lga" in dfa.columns else None
-
-            # level
-            if "alert_level" in dfa.columns:
-                out["level"] = dfa["alert_level"].astype(str)
-            elif "level" in dfa.columns:
-                out["level"] = dfa["level"].astype(str)
-            elif "hotspot_level" in dfa.columns:
-                out["level"] = dfa["hotspot_level"].astype(str)
-            else:
-                out["level"] = "ALERT"
-
-            out["confirmed_7d"] = pd.to_numeric(dfa["confirmed_7d"], errors="coerce").fillna(0).astype(int) if "confirmed_7d" in dfa.columns else 0
-            out["ratio"] = pd.to_numeric(dfa["ratio"], errors="coerce") if "ratio" in dfa.columns else None
-
-            if "message" in dfa.columns:
-                out["message"] = dfa["message"].astype(str)
-            elif "notes" in dfa.columns:
-                out["message"] = dfa["notes"].astype(str)
-            else:
-                out["message"] = ""
-
-            # source id
-            if "alert_id" in dfa.columns:
-                out["source_id"] = dfa["alert_id"].astype(str)
-            elif "id" in dfa.columns:
-                out["source_id"] = dfa["id"].astype(str)
-            else:
-                out["source_id"] = out["alert_time"].astype(str) + "|" + out["facility_id"].astype(str)
-
-            out = out.dropna(subset=["alert_time"]).sort_values("alert_time", ascending=False)
-            return out
+        df = df_select(
+            "tb_outbreak_alerts",
+            {"select": "*", "order": "created_at.desc", "limit": "20"},
+        )
     except Exception:
-        pass
+        return []
 
-    # Fallback: v_hotspots
-    try:
-        dfh = df_select("v_hotspots", {"select": "*", "limit": str(effective_limit())})
-        if dfh.empty:
-            return pd.DataFrame()
-
-        out = pd.DataFrame()
-        # create pseudo time: now
-        out["alert_time"] = pd.to_datetime(now_iso(), utc=True)
-        out["facility_id"] = dfh["facility_id"] if "facility_id" in dfh.columns else None
-        out["facility_name"] = dfh["facility_name"] if "facility_name" in dfh.columns else None
-        out["state"] = dfh["state"] if "state" in dfh.columns else None
-        out["lga"] = dfh["lga"] if "lga" in dfh.columns else None
-        out["level"] = dfh["hotspot_level"].astype(str) if "hotspot_level" in dfh.columns else "HOTSPOT"
-        out["confirmed_7d"] = pd.to_numeric(dfh["confirmed_7d"], errors="coerce").fillna(0).astype(int) if "confirmed_7d" in dfh.columns else 0
-        out["ratio"] = pd.to_numeric(dfh["ratio"], errors="coerce") if "ratio" in dfh.columns else None
-        out["message"] = "Hotspot signal from v_hotspots (fallback)."
-        out["source_id"] = (out["facility_id"].astype(str) + "|" + out["level"].astype(str))
-
-        # only keep meaningful ones
-        if "confirmed_7d" in out.columns:
-            out = out[out["confirmed_7d"] >= 1]
-
-        return out.sort_values(["confirmed_7d"], ascending=False).head(50)
-    except Exception:
-        return pd.DataFrame()
-
-
-def _apply_scope_filters(df: pd.DataFrame, facility_id: Optional[str]) -> pd.DataFrame:
     if df.empty:
-        return df
+        return []
 
-    role = st.session_state.get("role")
+    # Facility filter for non-organizer
+    if (not is_organizer()) and ("facility_id" in df.columns) and st.session_state.get("facility_id"):
+        df = df[df["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
 
-    # facility users
-    if role != "organizer":
-        if "facility_id" in df.columns and facility_id is not None:
-            df = df[df["facility_id"].astype(str) == str(facility_id)]
-
-    # organizer scope state
-    if role == "organizer":
+    # Organizer optional state scope
+    if is_organizer():
         scope_state = st.session_state.get("org_scope_state")
-        if scope_state and "state" in df.columns:
+        if scope_state and ("state" in df.columns):
             df = df[df["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
 
-    return df
+    if df.empty or "created_at" not in df.columns:
+        return []
 
-
-def render_live_alerts_banner(facility_id: Optional[str]):
-    """
-    Shows toast notifications for NEW alerts and a small panel.
-    Uses optional auto-refresh if streamlit_autorefresh is available.
-    """
-    if not bool(st.session_state.get("alerts_enabled", True)):
-        return
-
-    # Auto-refresh (polling) if available
-    if st_autorefresh is not None:
-        interval_ms = int(st.session_state.get("alerts_interval_sec", 20)) * 1000
-        st_autorefresh(interval=interval_ms, key="ohih_alerts_autorefresh")
-
-    try:
-        df = fetch_alerts_df()
-    except Exception:
-        return
-
+    df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
+    df = df.dropna(subset=["created_at"])
     if df.empty:
-        return
+        return []
 
-    df = _apply_scope_filters(df, facility_id)
-
-    if df.empty:
-        return
-
-    # Determine "new" alerts based on last seen timestamp and seen IDs
-    last_seen_ts = st.session_state.get("alerts_last_seen_ts")
-    last_seen_dt = _parse_dt_any(last_seen_ts)
-
-    seen_ids = st.session_state.get("alerts_seen_ids")
-    if not isinstance(seen_ids, set):
-        seen_ids = set()
-        st.session_state["alerts_seen_ids"] = seen_ids
-
-    # choose newest time
-    latest_time = df["alert_time"].max()
-    # toast only the top few new alerts
-    new_df = df.copy()
-
-    if last_seen_dt is not None:
-        new_df = new_df[new_df["alert_time"] > pd.to_datetime(last_seen_dt, utc=True)]
-
-    # Filter out already seen IDs
-    if "source_id" in new_df.columns:
-        new_df = new_df[~new_df["source_id"].astype(str).isin({str(x) for x in seen_ids})]
-
-    # Trigger toasts for new alerts (limit 3)
-    if not new_df.empty:
-        for _, r in new_df.head(3).iterrows():
-            level = str(r.get("level", "ALERT")).upper()
-            fac = str(r.get("facility_name", "Facility"))
-            state = str(r.get("state", "") or "")
-            lga = str(r.get("lga", "") or "")
-            c7 = int(r.get("confirmed_7d", 0) or 0)
-            ratio = r.get("ratio", None)
-
-            where = " / ".join([x for x in [state, lga] if x and x != "nan"])
-            ratio_txt = ""
-            try:
-                if ratio is not None and str(ratio) != "nan":
-                    ratio_txt = f" | Ratio: {float(ratio):.2f}x"
-            except Exception:
-                ratio_txt = ""
-
-            msg = f"{level}: {fac}" + (f" ({where})" if where else "") + f" | Confirmed(7d): {c7}{ratio_txt}"
-            if level in ("CRITICAL", "RED", "SEVERE"):
-                _safe_toast(msg, icon="🚨")
-            elif level in ("HIGH", "ORANGE"):
-                _safe_toast(msg, icon="⚠️")
-            else:
-                _safe_toast(msg, icon="🔔")
-
-            # mark seen
-            sid = str(r.get("source_id", ""))
-            if sid:
-                seen_ids.add(sid)
-
-        st.session_state["alerts_seen_ids"] = seen_ids
-
-    # update last seen to newest timestamp so we don't re-toast
-    if latest_time is not None and pd.notna(latest_time):
-        st.session_state["alerts_last_seen_ts"] = pd.to_datetime(latest_time, utc=True).isoformat()
-
-    # Small panel (top 5)
-    with st.expander("🔔 Live Outbreak Alerts (latest)", expanded=False):
-        show = df.head(10).copy()
-        # pretty columns
-        cols = [c for c in ["alert_time", "level", "facility_name", "state", "lga", "confirmed_7d", "ratio", "message"] if c in show.columns]
+    last_seen = st.session_state.get("last_alert_seen_ts")
+    if last_seen:
         try:
-            show["alert_time"] = pd.to_datetime(show["alert_time"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+            last_dt = pd.to_datetime(last_seen, utc=True)
+            df_new = df[df["created_at"] > last_dt]
         except Exception:
-            pass
-        df_show(show[cols], hide_index=True)
-        st.caption("Tip: If you don't see updates, click any button or enable auto-refresh (requires streamlit-autorefresh).")
+            df_new = df
+    else:
+        # First run: don't spam—mark latest as seen
+        latest = df["created_at"].max()
+        st.session_state["last_alert_seen_ts"] = latest.isoformat()
+        return []
+
+    return df_new.sort_values("created_at", ascending=True).to_dict(orient="records")
+
+
+def render_alerts_toast():
+    if not is_logged_in():
+        return
+    if not st.session_state.get("enable_live_alerts"):
+        return
+    if st.session_state.get("low_bw"):
+        return
+
+    new_rows = fetch_new_outbreak_alerts()
+    if not new_rows:
+        return
+
+    # Mark latest seen
+    try:
+        latest = max([pd.to_datetime(r.get("created_at"), utc=True) for r in new_rows])
+        st.session_state["last_alert_seen_ts"] = latest.isoformat()
+    except Exception:
+        pass
+
+    # Toast each alert (cap)
+    for r in new_rows[-5:]:
+        title = str(r.get("title") or r.get("alert_title") or "Outbreak alert")
+        fac = str(r.get("facility_name") or r.get("facility_id") or "")
+        state = str(r.get("state") or "")
+        level = str(r.get("alert_level") or r.get("level") or "ALERT")
+        msg = f"{level}: {title}"
+        if fac or state:
+            msg += f" | {fac} {state}".strip()
+        try:
+            st.toast(msg, icon="🚨")
+        except Exception:
+            st.warning(msg)
 
 
 # =========================
@@ -852,10 +781,12 @@ def _who_latest_metrics() -> Dict[str, Any]:
 
         role = st.session_state.get("role")
 
+        # Facility users → filter by facility
         if ("facility_id" in dfw.columns) and (role != "organizer"):
             facid = str(st.session_state.get("profile", {}).get("facility_id"))
             dfw = dfw[dfw["facility_id"].astype(str) == facid]
 
+        # Organizer → optional state scope
         if role == "organizer":
             scope_state = st.session_state.get("org_scope_state")
             if scope_state and ("state" in dfw.columns):
@@ -903,7 +834,7 @@ def render_topbar():
         <span class="ohih-badge">📡 Surveillance: ACTIVE</span>
         <span class="ohih-badge">📶 Low-BW: {"ON" if st.session_state.get("low_bw") else "OFF"}</span>
         <span class="ohih-badge">🛰️ Offline: {"ON" if st.session_state.get("offline_mode") else "OFF"}</span>
-        <span class="ohih-badge">🔔 Alerts: {"ON" if st.session_state.get("alerts_enabled") else "OFF"}</span>
+        <span class="ohih-badge">🚨 Live Alerts: {"ON" if st.session_state.get("enable_live_alerts") else "OFF"}</span>
       </div>
     </div>
     <div class="ohih-kpis">
@@ -930,8 +861,12 @@ with st.sidebar:
         st.write("Facility:", st.session_state.get("facility_name"))
 
         org_scope_ui()
+
+        st.session_state["enable_live_alerts"] = st.toggle(
+            "Enable live outbreak alerts (toast)", value=st.session_state.get("enable_live_alerts", False)
+        )
+
         offline_lowbw_ui()
-        alerts_ui()
 
         if st.button("Logout"):
             logout()
@@ -949,14 +884,7 @@ if not is_logged_in():
     password = st.text_input("Password", type="password")
 
     if st.button("Login", type="primary"):
-        try:
-            out = auth_sign_in(email.strip(), password)
-        except Exception as e:
-            st.error("Invalid login credentials (or Auth is down).")
-            st.caption("If you are sure your password is correct, confirm the user exists in Supabase Auth and staff_profiles.")
-            st.exception(e)
-            st.stop()
-
+        out = auth_sign_in(email.strip(), password)
         st.session_state["access_token"] = out["access_token"]
         st.session_state["user_id"] = out["user"]["id"]
 
@@ -975,7 +903,7 @@ if not is_logged_in():
             st.session_state["facility_id"] = None
         else:
             if not fac_id:
-                st.error("staff_profiles.facility_id missing. Fix in Supabase.")
+                st.error("staff_profiles.facility_id missing. Fix staff_profiles in Supabase.")
                 st.stop()
             fac = load_facility(str(fac_id))
             st.session_state["facility_name"] = fac.get("facility_name", "") or "—"
@@ -989,7 +917,7 @@ if not is_logged_in():
 
 
 # =========================
-# CONTEXT (stable: always reload profile + facility correctly)
+# CONTEXT (stable)
 # =========================
 uid = (st.session_state.get("user_id") or "").strip()
 if not uid:
@@ -1021,10 +949,11 @@ else:
     st.session_state["facility_name"] = fac.get("facility_name", "") or "—"
     st.session_state["facility_reg"] = fac.get("facility_reg", "") or ""
 
+# Try auto-load weights if DB table exists
+try_load_ai_weights_from_db()
 
-# 🔔 Global live alerts (runs on every page)
-# Put it right after context so it can toast immediately after refresh/rerun
-render_live_alerts_banner(facility_id)
+# Trigger toast notifications if enabled
+render_alerts_toast()
 
 
 # =========================
@@ -1041,6 +970,10 @@ def _local_patients_df() -> pd.DataFrame:
 
 
 def patient_picker() -> Optional[str]:
+    """
+    Online: server list
+    Offline: server list + local offline patients list
+    """
     dfp = safe_select_with_order(
         "patients",
         {"select": "patient_id,full_name,created_at,facility_id", "limit": str(effective_limit())},
@@ -1093,111 +1026,6 @@ def classify_resistance(rr: bool, inh: bool, fq: bool, bdq: bool, lzd: bool) -> 
     if rr:
         return "RR-TB"
     return "Drug-sensitive"
-
-
-# =========================
-# PASSWORD RESET (Organizer Key) - Facility Password Reset
-# =========================
-def _pbkdf2_hash_password(password: str, salt: Optional[bytes] = None, iters: int = 120_000) -> str:
-    """
-    Returns a single string you can store in facilities.facility_password_hash.
-    Format: pbkdf2$<iters>$<salt_b64>$<hash_b64>
-    """
-    if salt is None:
-        salt = os.urandom(16)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iters, dklen=32)
-    return f"pbkdf2${iters}${base64.urlsafe_b64encode(salt).decode().rstrip('=')}${base64.urlsafe_b64encode(dk).decode().rstrip('=')}"
-
-
-def page_password_reset():
-    render_topbar()
-    section("Password Reset (Organizer Key)")
-
-    if not is_organizer():
-        st.error("⛔ Organizer only.")
-        st.stop()
-
-    st.caption(
-        "This resets a facility password stored in `facilities.facility_password_hash` using an Organizer reset key.\n"
-        "Set `ORGANIZER_RESET_KEY` in Streamlit Secrets."
-    )
-
-    if not ORGANIZER_RESET_KEY:
-        st.warning("Missing `ORGANIZER_RESET_KEY` in Streamlit Secrets. Add it to enable resets.")
-        with st.expander("How to set it (Streamlit Secrets)"):
-            st.code(
-                'SUPABASE_URL="..."\nSUPABASE_ANON_KEY="..."\nORGANIZER_RESET_KEY="YOUR_STRONG_SECRET"\n',
-                language="text",
-            )
-
-    with st.expander("DB Setup Help (if column is missing)", expanded=False):
-        st.code(
-            "alter table public.facilities add column if not exists facility_password_hash text;\n"
-            "alter table public.facilities add column if not exists facility_password_updated_at timestamptz;\n",
-            language="sql",
-        )
-
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        facility_reg = st.text_input("Facility Registration Number (facility_reg) *", placeholder="e.g. RSUTH-001")
-        new_pw = st.text_input("New facility password *", type="password")
-        new_pw2 = st.text_input("Confirm new password *", type="password")
-        organizer_key = st.text_input("Organizer reset key *", type="password")
-
-    with c2:
-        st.markdown("**Safety**")
-        st.markdown("- Share the reset key only with national admin.\n- Use a strong password.\n- Keep logs in Supabase if needed.")
-
-    if st.button("Reset facility password", type="primary"):
-        if not ORGANIZER_RESET_KEY:
-            st.error("ORGANIZER_RESET_KEY not set in Secrets.")
-            st.stop()
-        if not facility_reg.strip():
-            st.error("facility_reg is required.")
-            st.stop()
-        if not new_pw or len(new_pw) < 6:
-            st.error("Password must be at least 6 characters.")
-            st.stop()
-        if new_pw != new_pw2:
-            st.error("Passwords do not match.")
-            st.stop()
-        if not organizer_key:
-            st.error("Organizer reset key is required.")
-            st.stop()
-        if not hmac.compare_digest(organizer_key.strip(), ORGANIZER_RESET_KEY):
-            st.error("Invalid organizer reset key.")
-            st.stop()
-
-        try:
-            df_fac = df_select(
-                "facilities",
-                {"select": "facility_id,facility_name,facility_reg", "facility_reg": f"eq.{facility_reg.strip()}", "limit": "1"},
-            )
-        except Exception as e:
-            st.error("Could not query facilities.")
-            st.exception(e)
-            st.stop()
-
-        if df_fac.empty:
-            st.error("No facility found with that facility_reg.")
-            st.stop()
-
-        fac_id = str(df_fac.iloc[0]["facility_id"])
-        fac_name = str(df_fac.iloc[0].get("facility_name", ""))
-
-        hashed = _pbkdf2_hash_password(new_pw)
-        try:
-            out = patch_row(
-                "facilities",
-                {"facility_id": f"eq.{fac_id}"},
-                {"facility_password_hash": hashed, "facility_password_updated_at": now_iso()},
-            )
-            st.success(f"Password reset ✅ for {fac_name} ({facility_reg.strip()})")
-            st.caption("Now update your facility-login logic (if you use it) to verify using facilities.facility_password_hash.")
-            st.write("Patch result:", out if isinstance(out, dict) else "OK")
-        except Exception as e:
-            st.error("Password reset failed.")
-            st.exception(e)
 
 
 # =========================
@@ -1460,99 +1288,135 @@ def predict_resistance_from_mutations(muts: List[str]) -> Dict[str, Any]:
     }
 
 
-def page_ai_drug_resistance_predictor():
+# =========================
+# NEW PAGE (1): PASSWORD RESET (Organizer) via RPC
+# =========================
+def page_password_reset():
     render_topbar()
-    section("AI Drug Resistance Predictor")
-    st.caption("Rule-based demo predictor: enter mutations (from LPA/WGS reports) → predicted resistance + MDR/XDR class.")
+    section("Password Reset (Organizer)")
 
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        muts_text = st.text_area(
-            "Mutations (comma or newline separated)",
-            placeholder="e.g.\nrpoB:S450L\nkatG:S315T\ngyrA:D94G\nRv0678:del",
-            height=140,
-        )
-    with c2:
-        st.markdown("**Tips**")
-        st.markdown(
-            "- Works best with keys like `rpoB:S450L`, `katG:S315T`, `gyrA:D94G`, `Rv0678:*`.\n"
-            "- You can extend mapping in code later.\n"
-            "- This page is analytics-only; it does not replace lab DST."
-        )
+    if not is_organizer():
+        st.error("⛔ Organizer only.")
+        st.stop()
 
-    muts = parse_mutations(muts_text)
-    if not muts:
-        st.info("Enter at least one mutation to predict resistance.")
-        return
+    st.caption(
+        "This page calls a Supabase RPC you will add in SQL. "
+        "Recommended RPC name: **reset_facility_password** (validate organizer_key on DB side)."
+    )
 
-    pred = predict_resistance_from_mutations(muts)
+    if not ORGANIZER_RESET_KEY:
+        st.warning("ORGANIZER_RESET_KEY is not set in Streamlit Secrets. You can still type the key below.")
 
-    if pred["alert"] == "CRITICAL":
-        st.error(f"🚨 Predicted Resistance Class: **{pred['class']}** (CRITICAL)")
-    elif pred["alert"] == "HIGH":
-        st.warning(f"⚠️ Predicted Resistance Class: **{pred['class']}** (HIGH)")
-    else:
-        st.success(f"✅ Predicted Resistance Class: **{pred['class']}**")
+    org_key = st.text_input("Organizer reset key", value=ORGANIZER_RESET_KEY, type="password")
+    facility_reg = st.text_input("Facility Registration Number (facility_reg)")
+    new_pw = st.text_input("New facility password", type="password")
+    confirm_pw = st.text_input("Confirm new facility password", type="password")
 
-    rd = pred["resistant_drugs"]
-    if not rd:
-        st.write("Predicted resistant drugs: **None detected by rules**")
-    else:
-        st.write("Predicted resistant drugs:", ", ".join([f"**{d}**" for d in rd]))
-        rows = [{"Drug": d, "Category": DRUG_BUCKETS.get(d, "Other")} for d in rd]
-        df_show(pd.DataFrame(rows), hide_index=True)
+    if st.button("Reset Password", type="primary"):
+        if not org_key.strip():
+            st.error("Organizer reset key is required.")
+            st.stop()
+        if not facility_reg.strip():
+            st.error("facility_reg is required.")
+            st.stop()
+        if not new_pw:
+            st.error("New password is required.")
+            st.stop()
+        if new_pw != confirm_pw:
+            st.error("Passwords do not match.")
+            st.stop()
 
-    with st.expander("See matched rule hits"):
-        if pred["matched_rules"]:
-            df_show(pd.DataFrame(pred["matched_rules"], columns=["Input mutation", "Mapped resistant drugs"]), hide_index=True)
-        else:
-            st.write("No direct mapping hit.")
+        tok = st.session_state["access_token"]
+        # Your SQL RPC should:
+        # - verify organizer role (or organizer key)
+        # - locate facility by facility_reg
+        # - hash password and update facility_password_hash (or whatever you use)
+        payload = {"organizer_key": org_key.strip(), "facility_reg": facility_reg.strip(), "new_password": new_pw}
 
-    st.markdown("---")
-    st.subheader("Resistance records (from your DB)")
-
-    try:
-        dfr = df_select("tb_drug_resistance", {"select": "*", "limit": str(effective_limit())})
-    except Exception as e:
-        st.error("Could not load tb_drug_resistance table.")
-        st.exception(e)
-        return
-
-    if dfr.empty:
-        st.info("No resistance records yet. Save some in the 'Drug Resistance' page or import GeneXpert with RIF resistance.")
-        return
-
-    if not is_organizer() and "facility_id" in dfr.columns:
-        dfr = dfr[dfr["facility_id"].astype(str) == str(facility_id)]
-
-    if is_organizer():
-        scope_state = st.session_state.get("org_scope_state")
-        if scope_state:
+        try:
+            r = rpc_call("reset_facility_password", tok, payload)
+            if r.status_code not in (200, 201):
+                st.error(f"RPC failed: {r.status_code} {r.text}")
+                st.stop()
+            st.success("Password reset successful ✅")
             try:
-                df_fac = df_select("facilities", {"select": "facility_id,state,lga,facility_name", "limit": str(effective_limit())})
-                if not df_fac.empty and "state" in df_fac.columns:
-                    dfr = dfr.merge(df_fac, on="facility_id", how="left")
-                    dfr = dfr[dfr["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
+                df_show(pd.DataFrame(r.json() if isinstance(r.json(), list) else [r.json()]), hide_index=True)
             except Exception:
                 pass
+        except Exception as e:
+            st.error("Password reset error.")
+            st.exception(e)
 
-    show_cols = [c for c in ["patient_id", "resistance_class", "test_method", "created_at", "notes", "facility_id", "facility_name", "state", "lga"] if c in dfr.columns]
-    if "created_at" in dfr.columns:
-        try:
-            dfr2 = dfr[show_cols].copy()
-            dfr2["created_at"] = pd.to_datetime(dfr2["created_at"], errors="coerce")
-            dfr2 = dfr2.sort_values("created_at", ascending=False)
-            df_show(dfr2, hide_index=True)
-        except Exception:
-            df_show(dfr[show_cols], hide_index=True)
-    else:
-        df_show(dfr[show_cols], hide_index=True)
 
-    st.subheader("Summary")
-    if "resistance_class" in dfr.columns:
-        summ = dfr["resistance_class"].fillna("UNKNOWN").value_counts().reset_index()
-        summ.columns = ["Resistance class", "Count"]
-        df_show(summ, hide_index=True)
+# =========================
+# NEW PAGE (3): AI WEIGHTS TUNING PANEL
+# =========================
+def page_ai_weights_tuning():
+    render_topbar()
+    section("AI Scoring Weights Tuning")
+
+    if not (is_organizer() or str(st.session_state.get("role", "")).lower() in ("facility_admin",)):
+        st.warning("This tuning panel is for Organizer / Facility Admin only.")
+        return
+
+    st.caption("Tune the screening_score weights used in Diagnosis Events (without editing code each time).")
+
+    weights = dict(st.session_state.get("ai_weights", DEFAULT_AI_WEIGHTS))
+
+    st.markdown("### Symptom weights")
+    c1, c2, c3 = st.columns(3)
+    weights["sx_cough_2w"] = c1.slider("Cough ≥ 2w", 0, 10, int(weights.get("sx_cough_2w", 3)))
+    weights["sx_fever"] = c2.slider("Fever", 0, 10, int(weights.get("sx_fever", 1)))
+    weights["sx_night_sweats"] = c3.slider("Night sweats", 0, 10, int(weights.get("sx_night_sweats", 1)))
+
+    c1, c2, c3 = st.columns(3)
+    weights["sx_weight_loss"] = c1.slider("Weight loss", 0, 10, int(weights.get("sx_weight_loss", 1)))
+    weights["sx_hemoptysis"] = c2.slider("Hemoptysis", 0, 10, int(weights.get("sx_hemoptysis", 3)))
+    weights["sx_chest_pain"] = c3.slider("Chest pain / breathlessness", 0, 10, int(weights.get("sx_chest_pain", 1)))
+
+    st.markdown("### Risk factor weights")
+    c1, c2, c3 = st.columns(3)
+    weights["rf_contact_tb"] = c1.slider("Contact with TB case", 0, 10, int(weights.get("rf_contact_tb", 2)))
+    weights["rf_prev_tb"] = c2.slider("Previous TB treatment", 0, 10, int(weights.get("rf_prev_tb", 1)))
+    weights["rf_diabetes"] = c3.slider("Diabetes (risk)", 0, 10, int(weights.get("rf_diabetes", 1)))
+
+    weights["rf_malnutrition"] = st.slider("Malnutrition / underweight (risk)", 0, 10, int(weights.get("rf_malnutrition", 1)))
+
+    st.markdown("### Comorbidity weights")
+    c1, c2, c3 = st.columns(3)
+    weights["comorbid_hiv"] = c1.slider("HIV positive", 0, 10, int(weights.get("comorbid_hiv", 2)))
+    weights["comorbid_diabetes"] = c2.slider("Diabetes (comorbidity)", 0, 10, int(weights.get("comorbid_diabetes", 1)))
+    weights["comorbid_malnutrition"] = c3.slider("Malnutrition", 0, 10, int(weights.get("comorbid_malnutrition", 1)))
+
+    c1, c2, c3 = st.columns(3)
+    weights["comorbid_ckd"] = c1.slider("CKD", 0, 10, int(weights.get("comorbid_ckd", 1)))
+    weights["comorbid_copd"] = c2.slider("COPD / chronic lung disease", 0, 10, int(weights.get("comorbid_copd", 1)))
+    weights["comorbid_cancer"] = c3.slider("Cancer", 0, 10, int(weights.get("comorbid_cancer", 1)))
+
+    weights["comorbid_immunosuppressed"] = st.slider(
+        "Immunosuppressed (steroids/transplant)", 0, 10, int(weights.get("comorbid_immunosuppressed", 1))
+    )
+
+    st.markdown("---")
+    c1, c2, c3 = st.columns([1, 1, 2])
+    if c1.button("Save weights (local)", type="primary"):
+        st.session_state["ai_weights"] = weights
+        st.success("Saved locally ✅ (affects scoring immediately)")
+
+    if c2.button("Reset to defaults"):
+        st.session_state["ai_weights"] = dict(DEFAULT_AI_WEIGHTS)
+        st.success("Reset to defaults ✅")
+
+    if c3.button("Save weights to DB (ai_scoring_weights)", help="Requires you to create ai_scoring_weights table + unique(scope,key)."):
+        ok, msg = try_save_ai_weights_to_db(weights)
+        if ok:
+            st.session_state["ai_weights"] = weights
+            st.success(f"DB save ✅ {msg}")
+        else:
+            st.warning(f"DB save failed (safe to ignore if table not created yet): {msg}")
+
+    with st.expander("Preview current weights JSON"):
+        df_show(pd.DataFrame([st.session_state.get("ai_weights", {})]).T.reset_index().rename(columns={"index": "key", 0: "weight"}), hide_index=True)
 
 
 # =========================
@@ -1605,7 +1469,6 @@ def page_patients():
         {"select": "*", "limit": str(effective_limit())},
         ["created_at.desc", "updated_at.desc", "patient_id.desc"],
     )
-
     dfl = _local_patients_df()
     if not dfl.empty:
         st.caption("Offline-created patients (local cache)")
@@ -1661,24 +1524,31 @@ def page_diagnosis_events():
         comorbid_cancer = st.checkbox("Cancer")
         comorbid_immunosuppressed = st.checkbox("Immunosuppressed (steroids/transplant)")
 
+    # --- NEW: use tunable weights
+    w = st.session_state.get("ai_weights", DEFAULT_AI_WEIGHTS)
+
     score = 0
-    score += 3 if sx_cough_2w else 0
-    score += 1 if sx_fever else 0
-    score += 1 if sx_night_sweats else 0
-    score += 1 if sx_weight_loss else 0
-    score += 3 if sx_hemoptysis else 0
-    score += 1 if sx_chest_pain else 0
-    score += 2 if rf_contact_tb else 0
-    score += 1 if rf_prev_tb else 0
-    score += 1 if rf_diabetes else 0
-    score += 1 if rf_malnutrition else 0
-    score += 2 if comorbid_hiv else 0
-    score += 1 if comorbid_diabetes else 0
-    score += 1 if comorbid_malnutrition else 0
-    score += 1 if comorbid_ckd else 0
-    score += 1 if comorbid_copd else 0
-    score += 1 if comorbid_immunosuppressed else 0
-    score += 1 if comorbid_cancer else 0
+    score += int(w.get("sx_cough_2w", 3)) if sx_cough_2w else 0
+    score += int(w.get("sx_fever", 1)) if sx_fever else 0
+    score += int(w.get("sx_night_sweats", 1)) if sx_night_sweats else 0
+    score += int(w.get("sx_weight_loss", 1)) if sx_weight_loss else 0
+    score += int(w.get("sx_hemoptysis", 3)) if sx_hemoptysis else 0
+    score += int(w.get("sx_chest_pain", 1)) if sx_chest_pain else 0
+
+    score += int(w.get("rf_contact_tb", 2)) if rf_contact_tb else 0
+    score += int(w.get("rf_prev_tb", 1)) if rf_prev_tb else 0
+    score += int(w.get("rf_diabetes", 1)) if rf_diabetes else 0
+    score += int(w.get("rf_malnutrition", 1)) if rf_malnutrition else 0
+
+    score += int(w.get("comorbid_hiv", 2)) if comorbid_hiv else 0
+    score += int(w.get("comorbid_diabetes", 1)) if comorbid_diabetes else 0
+    score += int(w.get("comorbid_malnutrition", 1)) if comorbid_malnutrition else 0
+    score += int(w.get("comorbid_smoking", 0)) if comorbid_smoking else 0
+    score += int(w.get("comorbid_alcohol", 0)) if comorbid_alcohol else 0
+    score += int(w.get("comorbid_ckd", 1)) if comorbid_ckd else 0
+    score += int(w.get("comorbid_copd", 1)) if comorbid_copd else 0
+    score += int(w.get("comorbid_cancer", 1)) if comorbid_cancer else 0
+    score += int(w.get("comorbid_immunosuppressed", 1)) if comorbid_immunosuppressed else 0
 
     triad = int(sx_fever) + int(sx_night_sweats) + int(sx_weight_loss)
     presumptive = (
@@ -1721,7 +1591,7 @@ def page_diagnosis_events():
     if st.button("Save event", type="primary"):
         payload = {
             "facility_id": facility_id,
-            "patient_id": pid,
+            "patient_id": pid,  # may be OFFLINE-* and will be mapped during sync
             "tb_probability": float(tb_probability),
             "category": category,
             "genexpert": genexpert,
@@ -1941,7 +1811,7 @@ def page_contact_tracing():
 
             payload = {
                 "facility_id": facility_id,
-                "index_patient_id": pid,
+                "index_patient_id": pid,  # may be OFFLINE-*
                 "full_name": name.strip(),
                 "age": int(age),
                 "sex": sex,
@@ -2021,6 +1891,81 @@ def page_drug_resistance():
     df_show(dfr, hide_index=True)
 
 
+def page_ai_drug_resistance_predictor():
+    render_topbar()
+    section("AI Drug Resistance Predictor")
+    st.caption("Rule-based demo predictor: enter mutations (from LPA/WGS reports) → predicted resistance + MDR/XDR class.")
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        muts_text = st.text_area(
+            "Mutations (comma or newline separated)",
+            placeholder="e.g.\nrpoB:S450L\nkatG:S315T\ngyrA:D94G\nRv0678:del",
+            height=140,
+        )
+    with c2:
+        st.markdown("**Tips**")
+        st.markdown(
+            "- Works best with keys like `rpoB:S450L`, `katG:S315T`, `gyrA:D94G`, `Rv0678:*`.\n"
+            "- You can extend mapping in code later.\n"
+            "- This page is analytics-only; it does not replace lab DST."
+        )
+
+    muts = parse_mutations(muts_text)
+    if not muts:
+        st.info("Enter at least one mutation to predict resistance.")
+        return
+
+    pred = predict_resistance_from_mutations(muts)
+
+    if pred["alert"] == "CRITICAL":
+        st.error(f"🚨 Predicted Resistance Class: **{pred['class']}** (CRITICAL)")
+    elif pred["alert"] == "HIGH":
+        st.warning(f"⚠️ Predicted Resistance Class: **{pred['class']}** (HIGH)")
+    else:
+        st.success(f"✅ Predicted Resistance Class: **{pred['class']}**")
+
+    rd = pred["resistant_drugs"]
+    if not rd:
+        st.write("Predicted resistant drugs: **None detected by rules**")
+    else:
+        st.write("Predicted resistant drugs:", ", ".join([f"**{d}**" for d in rd]))
+        rows = [{"Drug": d, "Category": DRUG_BUCKETS.get(d, "Other")} for d in rd]
+        df_show(pd.DataFrame(rows), hide_index=True)
+
+    with st.expander("See matched rule hits"):
+        if pred["matched_rules"]:
+            df_show(pd.DataFrame(pred["matched_rules"], columns=["Input mutation", "Mapped resistant drugs"]), hide_index=True)
+        else:
+            st.write("No direct mapping hit.")
+
+    st.markdown("---")
+    st.subheader("Resistance records (from your DB)")
+
+    try:
+        dfr = df_select("tb_drug_resistance", {"select": "*", "limit": str(effective_limit())})
+    except Exception as e:
+        st.error("Could not load tb_drug_resistance table.")
+        st.exception(e)
+        return
+
+    if dfr.empty:
+        st.info("No resistance records yet.")
+        return
+
+    if not is_organizer() and "facility_id" in dfr.columns:
+        dfr = dfr[dfr["facility_id"].astype(str) == str(facility_id)]
+
+    show_cols = [c for c in ["patient_id", "resistance_class", "test_method", "created_at", "notes", "facility_id"] if c in dfr.columns]
+    df_show(dfr[show_cols], hide_index=True)
+
+    st.subheader("Summary")
+    if "resistance_class" in dfr.columns:
+        summ = dfr["resistance_class"].fillna("UNKNOWN").value_counts().reset_index()
+        summ.columns = ["Resistance class", "Count"]
+        df_show(summ, hide_index=True)
+
+
 def page_genexpert_import():
     render_topbar()
     section("GeneXpert Import (CSV)")
@@ -2077,8 +2022,6 @@ def page_genexpert_import():
                             "created_at": now_iso(),
                         },
                     )
-                    if outp.get("queued"):
-                        raise ValueError("Offline mode: import needs online sync (patients must get real uuid first).")
                     pid = str(outp.get("patient_id"))
 
                 category = "CONFIRMED TB" if mtb_detected else "LOW"
@@ -2199,40 +2142,9 @@ def page_gis_heatmap():
     dfm["longitude"] = pd.to_numeric(dfm.get("longitude"), errors="coerce")
     dfm["confirmed_tb"] = pd.to_numeric(dfm.get("confirmed_tb"), errors="coerce").fillna(0).astype(int)
 
-    states = sorted([str(x) for x in dfm.get("state", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
-
-    col1, col2, col3 = st.columns(3)
-    scope_state = st.session_state.get("org_scope_state") if is_organizer() else None
-
-    with col1:
-        if scope_state:
-            state = scope_state
-            st.selectbox("State", [state], index=0, disabled=True)
-        else:
-            state = st.selectbox("State", ["All"] + states)
-
-    if state != "All" and "state" in dfm.columns:
-        lgas = sorted([str(x) for x in dfm[dfm["state"] == state].get("lga", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
-    else:
-        lgas = sorted([str(x) for x in dfm.get("lga", pd.Series([])).dropna().unique().tolist() if str(x).strip()])
-
-    with col2:
-        lga = st.selectbox("LGA", ["All"] + lgas)
-
-    with col3:
-        min_cases = st.number_input("Min confirmed TB", 0, 100000, 0)
-
-    dff = dfm.copy()
-    if state != "All" and "state" in dff.columns:
-        dff = dff[dff["state"] == state]
-    if lga != "All" and "lga" in dff.columns:
-        dff = dff[dff["lga"] == lga]
-
-    dff = dff[dff["confirmed_tb"] >= int(min_cases)]
-    dff = dff.dropna(subset=["latitude", "longitude"])
-
+    dff = dfm.dropna(subset=["latitude", "longitude"])
     if dff.empty:
-        st.warning("No facilities with coordinates match your filters.")
+        st.warning("No facilities with coordinates.")
         return
 
     fig = px.density_mapbox(
@@ -2253,27 +2165,7 @@ def page_gis_heatmap():
 def page_outbreak_alerts():
     render_topbar()
     section("Outbreak Alerts")
-    st.caption("Uses v_hotspots view + tb_outbreak_alerts table (7d vs previous 28d).")
-
-    # Manual refresh button (useful if no auto-refresh helper installed)
-    c1, c2 = st.columns([1, 3])
-    with c1:
-        if st.button("🔄 Refresh alerts now"):
-            st.rerun()
-    with c2:
-        st.caption("If your app is deployed without auto-refresh, click refresh to fetch latest alerts.")
-
-    # prefer showing normalized alerts
-    df_alerts = fetch_alerts_df()
-    df_alerts = _apply_scope_filters(df_alerts, facility_id)
-
-    if df_alerts.empty:
-        st.info("No alerts yet.")
-    else:
-        df_show(df_alerts.head(50), hide_index=True)
-
-    st.markdown("---")
-    st.subheader("Hotspot ranking (last 7 days)")
+    st.caption("Uses v_hotspots view + tb_outbreak_alerts table.")
 
     try:
         dfh = df_select("v_hotspots", {"select": "*", "limit": str(effective_limit())})
@@ -2290,7 +2182,18 @@ def page_outbreak_alerts():
         dfh = dfh[dfh["facility_id"].astype(str) == str(facility_id)]
 
     show_cols = [c for c in ["facility_name", "state", "lga", "confirmed_7d", "confirmed_prev_28d", "ratio", "hotspot_level"] if c in dfh.columns]
+    st.subheader("Hotspot ranking (last 7 days)")
     df_show(dfh[show_cols].sort_values("confirmed_7d", ascending=False), hide_index=True)
+
+    st.markdown("---")
+    st.subheader("Latest alert feed (tb_outbreak_alerts)")
+    try:
+        dfa = df_select("tb_outbreak_alerts", {"select": "*", "order": "created_at.desc", "limit": "50"})
+        if not is_organizer() and "facility_id" in dfa.columns:
+            dfa = dfa[dfa["facility_id"].astype(str) == str(facility_id)]
+        df_show(dfa, hide_index=True)
+    except Exception:
+        st.info("tb_outbreak_alerts not available yet (safe to ignore if you haven't created it).")
 
 
 def page_exports():
@@ -2337,13 +2240,14 @@ ROLE_PERMISSIONS = {
         "Contact Tracing",
         "Drug Resistance",
         "AI Drug Resistance Predictor",
+        "AI Weights Tuning",
+        "Password Reset (Organizer)",
         "GeneXpert Import",
         "WHO Dashboard",
         "GIS Heatmap",
         "Outbreak Alerts",
         "Exports",
         "National View",
-        "Password Reset",
     ],
     "facility_admin": [
         "Home",
@@ -2355,6 +2259,7 @@ ROLE_PERMISSIONS = {
         "Contact Tracing",
         "Drug Resistance",
         "AI Drug Resistance Predictor",
+        "AI Weights Tuning",
         "GeneXpert Import",
         "WHO Dashboard",
         "GIS Heatmap",
@@ -2443,6 +2348,10 @@ elif page_clean == "Drug Resistance":
     page_drug_resistance()
 elif page_clean == "AI Drug Resistance Predictor":
     page_ai_drug_resistance_predictor()
+elif page_clean == "AI Weights Tuning":
+    page_ai_weights_tuning()
+elif page_clean == "Password Reset (Organizer)":
+    page_password_reset()
 elif page_clean == "GeneXpert Import":
     page_genexpert_import()
 elif page_clean == "WHO Dashboard":
@@ -2458,7 +2367,5 @@ elif page_clean == "National View":
         st.error("⛔ Only national organizers can access this page")
         st.stop()
     page_national_view()
-elif page_clean == "Password Reset":
-    page_password_reset()
 else:
     page_home()
