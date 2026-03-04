@@ -8,11 +8,6 @@ import requests
 import streamlit as st
 
 try:
-    import numpy as np
-except Exception:
-    np = None
-
-try:
     import plotly.express as px
 except Exception:
     px = None
@@ -149,101 +144,6 @@ def df_show(df, **kwargs):
     return st.dataframe(df, **kwargs)
 
 
-# ============================================================
-# CRITICAL FIX: Guard against numpy/pandas scalar types in selectboxes/radios
-# Streamlit throws: StreamlitAPIException: Selectbox Value has invalid type: int64
-# ============================================================
-def _to_py_scalar(x: Any) -> Any:
-    """
-    Convert numpy/pandas scalars (np.int64, np.float64, pd.Timestamp, etc.) into native Python types.
-    This prevents Streamlit selectbox/radio errors.
-    """
-    try:
-        # pandas scalar / numpy scalar often support .item()
-        if hasattr(x, "item") and callable(getattr(x, "item")):
-            return x.item()
-    except Exception:
-        pass
-
-    # pandas Timestamp to python datetime
-    try:
-        if isinstance(x, pd.Timestamp):
-            return x.to_pydatetime()
-    except Exception:
-        pass
-
-    return x
-
-
-def _normalize_options(options: Any) -> List[Any]:
-    """
-    Ensure options is a list of python-native values.
-    Accepts: list/tuple/set, pandas Series/Index, numpy array.
-    """
-    if options is None:
-        return []
-
-    # pandas Series/Index
-    try:
-        if isinstance(options, (pd.Series, pd.Index)):
-            options = options.tolist()
-    except Exception:
-        pass
-
-    # numpy array
-    try:
-        if np is not None and isinstance(options, np.ndarray):
-            options = options.tolist()
-    except Exception:
-        pass
-
-    # set/tuple -> list
-    if isinstance(options, (set, tuple)):
-        options = list(options)
-
-    if not isinstance(options, list):
-        # fallback: single value -> list
-        options = [options]
-
-    return [_to_py_scalar(v) for v in options]
-
-
-def selectbox_safe(label: str, options: Any, **kwargs):
-    """
-    Safe wrapper that converts all options (and default/index if present) into python-native types.
-    """
-    opts = _normalize_options(options)
-
-    # If user passed index, ensure it's python int
-    if "index" in kwargs and kwargs["index"] is not None:
-        try:
-            kwargs["index"] = int(_to_py_scalar(kwargs["index"]))
-        except Exception:
-            pass
-
-    # If user passed a value (older patterns), convert it
-    if "value" in kwargs and kwargs["value"] is not None:
-        kwargs["value"] = _to_py_scalar(kwargs["value"])
-
-    # Defensive: if opts empty, still render
-    if not opts:
-        return st.selectbox(label, [], **kwargs)
-
-    return st.selectbox(label, opts, **kwargs)
-
-
-def radio_safe(label: str, options: Any, **kwargs):
-    opts = _normalize_options(options)
-    if "index" in kwargs and kwargs["index"] is not None:
-        try:
-            kwargs["index"] = int(_to_py_scalar(kwargs["index"]))
-        except Exception:
-            pass
-    if "value" in kwargs and kwargs["value"] is not None:
-        kwargs["value"] = _to_py_scalar(kwargs["value"])
-    return st.radio(label, opts, **kwargs)
-
-
 # =========================
 # CONFIG / SECRETS (CLEAN)
 # =========================
@@ -311,6 +211,11 @@ def ss_init():
     st.session_state.setdefault("facility_id", None)
     st.session_state.setdefault("role", "standard")
 
+    # Organizer “data-entry facility context” (prevents null facility_id inserts)
+    st.session_state.setdefault("active_facility_id", None)
+    st.session_state.setdefault("active_facility_name", "")
+    st.session_state.setdefault("active_facility_reg", "")
+
     # Offline + Low-bandwidth
     st.session_state.setdefault("offline_mode", False)
     st.session_state.setdefault("low_bw", False)
@@ -334,6 +239,9 @@ def ss_init():
     # AI scoring weights (tunable)
     st.session_state.setdefault("ai_weights", dict(DEFAULT_AI_WEIGHTS))
     st.session_state.setdefault("ai_weights_loaded", False)
+
+    # Facility auto-registration generated pw (temp)
+    st.session_state.setdefault("auto_reg_pw", "")
 
 
 ss_init()
@@ -552,6 +460,90 @@ def load_facility(facility_id: str) -> Dict[str, Any]:
 
 
 # =========================
+# ORGANIZER: DATA ENTRY FACILITY CONTEXT (fixes null facility_id inserts)
+# =========================
+def active_facility_id() -> Optional[str]:
+    """
+    For non-organizer: always returns their facility_id.
+    For organizer: returns selected "active_facility_id" (if chosen), else None.
+    """
+    if not is_organizer():
+        v = st.session_state.get("facility_id")
+        return str(v) if v else None
+    v = st.session_state.get("active_facility_id")
+    return str(v) if v else None
+
+
+def require_facility_context_for_write() -> Optional[str]:
+    """
+    If organizer and no active facility selected -> block writes to any facility-owned tables.
+    """
+    afid = active_facility_id()
+    if not afid:
+        st.error("Organizer must select a facility context (sidebar → 'Data Entry Facility') before saving records.")
+        st.stop()
+    return afid
+
+
+def organizer_data_entry_facility_ui():
+    """
+    Sidebar control so Organizer can safely create patients/events/etc without null facility_id.
+    """
+    if not is_organizer():
+        return
+
+    st.sidebar.markdown("### 🏥 Data Entry Facility")
+    st.sidebar.caption("Choose where new records should be saved (prevents null facility_id).")
+
+    try:
+        df_fac = df_select(
+            "facilities",
+            {"select": "facility_id,facility_name,facility_reg,state,lga,created_at", "order": "created_at.desc", "limit": "200"},
+        )
+    except Exception:
+        df_fac = pd.DataFrame()
+
+    if df_fac.empty:
+        st.sidebar.info("No facilities readable (RLS/table missing). Auto-registration page can still be used if allowed.")
+        st.session_state["active_facility_id"] = None
+        st.session_state["active_facility_name"] = ""
+        st.session_state["active_facility_reg"] = ""
+        return
+
+    df_fac["label"] = (
+        df_fac["facility_name"].astype(str)
+        + " | "
+        + df_fac["facility_reg"].astype(str)
+        + " | "
+        + df_fac.get("state", pd.Series([""] * len(df_fac))).astype(str)
+    )
+
+    labels = ["— Select facility (required for saving) —"] + df_fac["label"].tolist()
+    current_id = st.session_state.get("active_facility_id")
+    idx = 0
+    if current_id:
+        try:
+            idx = 1 + df_fac.index[df_fac["facility_id"].astype(str) == str(current_id)][0]
+        except Exception:
+            idx = 0
+
+    chosen = st.sidebar.selectbox("Data Entry Facility", labels, index=idx)
+    if chosen.startswith("—"):
+        st.session_state["active_facility_id"] = None
+        st.session_state["active_facility_name"] = ""
+        st.session_state["active_facility_reg"] = ""
+        return
+
+    row = df_fac[df_fac["label"] == chosen].head(1)
+    if row.empty:
+        return
+
+    st.session_state["active_facility_id"] = str(row.iloc[0]["facility_id"])
+    st.session_state["active_facility_name"] = str(row.iloc[0].get("facility_name", "") or "")
+    st.session_state["active_facility_reg"] = str(row.iloc[0].get("facility_reg", "") or "")
+
+
+# =========================
 # UI: Organizer scope + Offline/Low-BW
 # =========================
 def org_scope_ui():
@@ -563,7 +555,7 @@ def org_scope_ui():
     if current not in options:
         current = "National"
 
-    choice = selectbox_safe("🌍 Organizer Scope", options, index=options.index(current))
+    choice = st.sidebar.selectbox("🌍 Organizer Scope", options, index=options.index(current))
     st.session_state["org_scope"] = choice
     st.session_state["org_scope_state"] = None if choice == "National" else choice
 
@@ -752,7 +744,7 @@ def try_load_ai_weights_from_db() -> None:
                 if not k:
                     continue
                 try:
-                    weights[k] = int(_to_py_scalar(row.get("weight", weights.get(k, 0)) or 0))
+                    weights[k] = int(row.get("weight", weights.get(k, 0)) or 0)
                 except Exception:
                     pass
             st.session_state["ai_weights"] = weights
@@ -908,7 +900,14 @@ def _who_latest_metrics() -> Dict[str, Any]:
 
 
 def render_topbar():
-    fac_name = st.session_state.get("facility_name") or "—"
+    # For organizer, show the selected data-entry facility (if any) in the badge
+    if is_organizer():
+        fac_name = st.session_state.get("active_facility_name") or "National View"
+        fac_reg = st.session_state.get("active_facility_reg") or "ALL"
+    else:
+        fac_name = st.session_state.get("facility_name") or "—"
+        fac_reg = st.session_state.get("facility_reg") or "—"
+
     role = st.session_state.get("role") or "standard"
 
     k = _who_latest_metrics()
@@ -929,6 +928,7 @@ def render_topbar():
       <div class="ohih-sub">National-grade TB Intelligence • RLS + Auth • Multi-facility isolation • WHO reporting-ready</div>
       <div class="ohih-badges">
         <span class="ohih-badge">🏥 Facility: {fac_name}</span>
+        <span class="ohih-badge">🧾 Reg: {fac_reg}</span>
         <span class="ohih-badge">🛡️ Role: {role}</span>
         <span class="ohih-badge">🔒 RLS: ON</span>
         <span class="ohih-badge">📡 Surveillance: ACTIVE</span>
@@ -958,9 +958,12 @@ with st.sidebar:
     if is_logged_in():
         st.write("User:", st.session_state.get("user_id"))
         st.write("Role:", st.session_state.get("role"))
-        st.write("Facility:", st.session_state.get("facility_name"))
-
+        if not is_organizer():
+            st.write("Facility:", st.session_state.get("facility_name"))
+        else:
+            st.write("View:", "Organizer (National/State)")
         org_scope_ui()
+        organizer_data_entry_facility_ui()
 
         st.session_state["enable_live_alerts"] = st.toggle(
             "Enable live outbreak alerts (toast)", value=st.session_state.get("enable_live_alerts", False)
@@ -1001,6 +1004,10 @@ if not is_logged_in():
             st.session_state["facility_name"] = "National View"
             st.session_state["facility_reg"] = "ALL"
             st.session_state["facility_id"] = None
+            # organizer active facility context stays None until user selects in sidebar
+            st.session_state["active_facility_id"] = None
+            st.session_state["active_facility_name"] = ""
+            st.session_state["active_facility_reg"] = ""
         else:
             if not fac_id:
                 st.error("staff_profiles.facility_id missing. Fix staff_profiles in Supabase.")
@@ -1064,8 +1071,12 @@ def _local_patients_df() -> pd.DataFrame:
     if not lp:
         return pd.DataFrame()
     df = pd.DataFrame(lp)
-    if "facility_id" in df.columns and not is_organizer() and facility_id is not None:
-        df = df[df["facility_id"].astype(str) == str(facility_id)]
+
+    afid = active_facility_id()
+    if "facility_id" in df.columns and afid:
+        df = df[df["facility_id"].astype(str) == str(afid)]
+    elif "facility_id" in df.columns and (not is_organizer()) and (st.session_state.get("facility_id") is not None):
+        df = df[df["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
     return df
 
 
@@ -1074,14 +1085,20 @@ def patient_picker() -> Optional[str]:
     Online: server list
     Offline: server list + local offline patients list
     """
+    base = {"select": "patient_id,full_name,created_at,facility_id", "limit": str(effective_limit())}
+    afid = active_facility_id()
+    if afid:
+        base["facility_id"] = f"eq.{afid}"
+
     dfp = safe_select_with_order(
         "patients",
-        {"select": "patient_id,full_name,created_at,facility_id", "limit": str(effective_limit())},
+        base,
         ["created_at.desc", "updated_at.desc", "patient_id.desc"],
     )
 
-    if not is_organizer() and (not dfp.empty) and ("facility_id" in dfp.columns) and facility_id is not None:
-        dfp = dfp[dfp["facility_id"].astype(str) == str(facility_id)]
+    # If non-organizer and facility_id available: ensure facility filter
+    if not is_organizer() and (not dfp.empty) and ("facility_id" in dfp.columns) and st.session_state.get("facility_id"):
+        dfp = dfp[dfp["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
 
     dfl = _local_patients_df()
     if not dfl.empty:
@@ -1089,7 +1106,10 @@ def patient_picker() -> Optional[str]:
         dfp = pd.concat([dfp[["patient_id", "full_name", "created_at"]], dfl], ignore_index=True) if not dfp.empty else dfl
 
     if dfp.empty:
-        st.info("No patients yet. Add one first.")
+        if is_organizer() and not afid:
+            st.info("Organizer: select a facility in the sidebar ('Data Entry Facility') to see patients for that facility.")
+        else:
+            st.info("No patients yet. Add one first.")
         return None
 
     try:
@@ -1098,10 +1118,9 @@ def patient_picker() -> Optional[str]:
     except Exception:
         pass
 
-    # Ensure labels are pure python strings
     labels = (dfp["patient_id"].astype(str) + " — " + dfp["full_name"].astype(str)).tolist()
-    chosen = selectbox_safe("Select patient", labels)
-    return str(chosen).split(" — ")[0].strip()
+    chosen = st.selectbox("Select patient", labels)
+    return chosen.split(" — ")[0].strip()
 
 
 def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -1142,12 +1161,18 @@ def ai_prediction_df() -> pd.DataFrame:
     df = df_select("v_ai_prediction_7d", {"select": "*", "limit": str(effective_limit())})
     if df.empty:
         return df
+
+    afid = active_facility_id()
+
     if (not is_organizer()) and ("facility_id" in df.columns):
-        df = df[df["facility_id"].astype(str) == str(facility_id)]
+        df = df[df["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")
         if scope_state and ("state" in df.columns):
             df = df[df["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
+        if afid and ("facility_id" in df.columns):
+            # optionally focus AI panel on selected data-entry facility
+            df = df[df["facility_id"].astype(str) == str(afid)]
     return df
 
 
@@ -1155,12 +1180,17 @@ def ai_drivers_df() -> pd.DataFrame:
     df = df_select("v_ai_drivers_facility", {"select": "*", "limit": str(effective_limit())})
     if df.empty:
         return df
+
+    afid = active_facility_id()
+
     if (not is_organizer()) and ("facility_id" in df.columns):
-        df = df[df["facility_id"].astype(str) == str(facility_id)]
+        df = df[df["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")
         if scope_state and ("state" in df.columns):
             df = df[df["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
+        if afid and ("facility_id" in df.columns):
+            df = df[df["facility_id"].astype(str) == str(afid)]
     return df
 
 
@@ -1168,12 +1198,17 @@ def ai_map_df() -> pd.DataFrame:
     df = df_select("v_ai_map_overlay", {"select": "*", "limit": str(effective_limit())})
     if df.empty:
         return df
+
+    afid = active_facility_id()
+
     if (not is_organizer()) and ("facility_id" in df.columns):
-        df = df[df["facility_id"].astype(str) == str(facility_id)]
+        df = df[df["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")
         if scope_state and ("state" in df.columns):
             df = df[df["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
+        if afid and ("facility_id" in df.columns):
+            df = df[df["facility_id"].astype(str) == str(afid)]
     return df
 
 
@@ -1242,7 +1277,7 @@ def render_ai_block(show_map: bool = True):
         for col, label in driver_cols:
             if col in d:
                 try:
-                    drivers.append((label, int(_to_py_scalar(d.get(col) or 0))))
+                    drivers.append((label, int(d.get(col) or 0)))
                 except Exception:
                     drivers.append((label, 0))
 
@@ -1675,7 +1710,10 @@ def page_facility_auto_registration():
     st.markdown("---")
     st.subheader("Existing facilities (quick view)")
     try:
-        df_fac = df_select("facilities", {"select": "facility_id,facility_name,facility_reg,state,lga,created_at", "order": "created_at.desc", "limit": "50"})
+        df_fac = df_select(
+            "facilities",
+            {"select": "facility_id,facility_name,facility_reg,state,lga,created_at", "order": "created_at.desc", "limit": "50"},
+        )
         df_show(df_fac, hide_index=True)
     except Exception:
         st.caption("Facilities table not readable for your current RLS policies (or table missing).")
@@ -1688,8 +1726,14 @@ def page_home():
     render_topbar()
     section("Home")
     st.success("✅ Authenticated. RLS isolates data per facility. WHO Dashboard + GIS + Alerts enabled.")
-    st.write("Facility ID:", facility_id)
     st.write("Role:", st.session_state.get("role"))
+
+    if is_organizer():
+        st.write("Organizer state scope:", st.session_state.get("org_scope", "National"))
+        st.write("Data-entry facility:", st.session_state.get("active_facility_name") or "— (select in sidebar)")
+        st.write("Active facility_id:", active_facility_id())
+    else:
+        st.write("Facility ID:", st.session_state.get("facility_id"))
 
     st.markdown("---")
     section("AI Outbreak Prediction")
@@ -1700,21 +1744,28 @@ def page_patients():
     render_topbar()
     section("Patients")
 
+    afid = active_facility_id()
+    if is_organizer() and not afid:
+        st.info("Organizer: select a facility in the sidebar ('Data Entry Facility') to create/view patients for that facility.")
+
     with st.expander("➕ Register new patient", expanded=True):
         full_name = st.text_input("Full name *")
         age = st.number_input("Age", 0, 120, 30)
-        sex = selectbox_safe("Sex", ["Male", "Female", "Other"])
+        sex = st.selectbox("Sex", ["Male", "Female", "Other"])
         phone = st.text_input("Phone")
         address = st.text_area("Address")
         if st.button("Save patient", type="primary"):
             if not full_name.strip():
                 st.error("Full name required.")
                 st.stop()
+
+            fac_to_use = require_facility_context_for_write() if is_organizer() else str(st.session_state.get("facility_id"))
+
             payload = {
-                "facility_id": facility_id,
+                "facility_id": fac_to_use,
                 "full_name": full_name.strip(),
                 "age": int(age),
-                "sex": str(sex),
+                "sex": sex,
                 "phone": phone.strip(),
                 "address": address.strip(),
                 "created_at": now_iso(),
@@ -1726,9 +1777,13 @@ def page_patients():
                 st.success(f"Saved ✅ Patient: {out.get('patient_id')}")
             st.rerun()
 
+    base = {"select": "*", "limit": str(effective_limit())}
+    if afid:
+        base["facility_id"] = f"eq.{afid}"
+
     dfp = safe_select_with_order(
         "patients",
-        {"select": "*", "limit": str(effective_limit())},
+        base,
         ["created_at.desc", "updated_at.desc", "patient_id.desc"],
     )
     dfl = _local_patients_df()
@@ -1742,15 +1797,19 @@ def page_patients():
 def page_diagnosis_events():
     render_topbar()
     section("Diagnosis Events")
+
+    afid = active_facility_id()
+    if is_organizer() and not afid:
+        st.info("Organizer: select a facility in the sidebar ('Data Entry Facility') to create/view diagnosis events for that facility.")
     pid = patient_picker()
     if not pid:
         st.stop()
 
     tb_probability = st.slider("TB Probability", 0.0, 1.0, 0.2, 0.01)
-    category = selectbox_safe("Category", ["LOW", "MODERATE", "HIGH", "CONFIRMED TB"])
-    genexpert = selectbox_safe("GeneXpert", ["Not done", "Positive", "Negative"])
-    smear = selectbox_safe("Smear", ["Not done", "Positive", "Negative"])
-    cxr = selectbox_safe("CXR", ["Not done", "Suggestive", "Not suggestive"])
+    category = st.selectbox("Category", ["LOW", "MODERATE", "HIGH", "CONFIRMED TB"])
+    genexpert = st.selectbox("GeneXpert", ["Not done", "Positive", "Negative"])
+    smear = st.selectbox("Smear", ["Not done", "Positive", "Negative"])
+    cxr = st.selectbox("CXR", ["Not done", "Suggestive", "Not suggestive"])
     notes = st.text_area("Notes")
 
     st.markdown("### TB Screening Symptoms")
@@ -1851,14 +1910,16 @@ def page_diagnosis_events():
     )
 
     if st.button("Save event", type="primary"):
+        fac_to_use = require_facility_context_for_write() if is_organizer() else str(st.session_state.get("facility_id"))
+
         payload = {
-            "facility_id": facility_id,
-            "patient_id": str(pid),  # may be OFFLINE-* and will be mapped during sync
+            "facility_id": fac_to_use,
+            "patient_id": pid,  # may be OFFLINE-* and will be mapped during sync
             "tb_probability": float(tb_probability),
-            "category": str(category),
-            "genexpert": str(genexpert),
-            "smear": str(smear),
-            "cxr": str(cxr),
+            "category": category,
+            "genexpert": genexpert,
+            "smear": smear,
+            "cxr": cxr,
             "notes": notes.strip(),
             "timestamp": now_iso(),
             "sx_cough_2w": sx_cough_2w,
@@ -1891,9 +1952,14 @@ def page_diagnosis_events():
             st.success("Saved ✅")
         st.rerun()
 
+    base = {"select": "*", "limit": str(effective_limit())}
+    afid2 = active_facility_id()
+    if afid2:
+        base["facility_id"] = f"eq.{afid2}"
+
     dfe = safe_select_with_order(
         "events",
-        {"select": "*", "limit": str(effective_limit())},
+        base,
         ["timestamp.desc", "created_at.desc", "event_id.desc"],
     )
     df_show(dfe, hide_index=True)
@@ -1902,6 +1968,9 @@ def page_diagnosis_events():
 def page_dots():
     render_topbar()
     section("DOTS")
+    afid = active_facility_id()
+    if is_organizer() and not afid:
+        st.info("Organizer: select a facility in the sidebar ('Data Entry Facility') to create/view DOTS for that facility.")
     pid = patient_picker()
     if not pid:
         st.stop()
@@ -1911,9 +1980,11 @@ def page_dots():
     note = st.text_input("Note")
 
     if st.button("Save DOTS", type="primary"):
+        fac_to_use = require_facility_context_for_write() if is_organizer() else str(st.session_state.get("facility_id"))
+
         payload = {
-            "facility_id": facility_id,
-            "patient_id": str(pid),
+            "facility_id": fac_to_use,
+            "patient_id": pid,
             "date": date.isoformat(),
             "dose_taken": bool(dose_taken),
             "note": note.strip(),
@@ -1932,7 +2003,7 @@ def page_dots():
             st.rerun()
         else:
             if "duplicate key" in r.text.lower() or r.status_code == 409:
-                match = {"facility_id": f"eq.{facility_id}", "patient_id": f"eq.{pid}", "date": f"eq.{date.isoformat()}"}
+                match = {"facility_id": f"eq.{fac_to_use}", "patient_id": f"eq.{pid}", "date": f"eq.{date.isoformat()}"}
                 try:
                     patch_row("dots_daily", match, {"dose_taken": bool(dose_taken), "note": note.strip()})
                     st.success("Updated ✅")
@@ -1947,13 +2018,16 @@ def page_dots():
 def page_adherence():
     render_topbar()
     section("Adherence")
+    afid = active_facility_id()
+    if is_organizer() and not afid:
+        st.info("Organizer: select a facility in the sidebar ('Data Entry Facility') to create/view adherence for that facility.")
     pid = patient_picker()
     if not pid:
         st.stop()
 
     missed_7 = st.number_input("Missed doses (last 7 days)", 0, 7, 0)
     missed_28 = st.number_input("Missed doses (last 28 days)", 0, 28, 0)
-    missed_streak = selectbox_safe("Longest missed streak", ["0 days", "1–2 days", "3–6 days", "1 week", "2 weeks", "3 weeks", "1 month+"])
+    missed_streak = st.selectbox("Longest missed streak", ["0 days", "1–2 days", "3–6 days", "1 week", "2 weeks", "3 weeks", "1 month+"])
     completed = st.checkbox("Completed regimen", False)
 
     adh_7 = max(0.0, 100.0 * (1 - missed_7 / 7))
@@ -1965,12 +2039,14 @@ def page_adherence():
 
     notes = st.text_area("Notes")
     if st.button("Save adherence snapshot", type="primary"):
+        fac_to_use = require_facility_context_for_write() if is_organizer() else str(st.session_state.get("facility_id"))
+
         payload = {
-            "facility_id": facility_id,
-            "patient_id": str(pid),
+            "facility_id": fac_to_use,
+            "patient_id": pid,
             "missed_7": int(missed_7),
             "missed_28": int(missed_28),
-            "missed_streak": str(missed_streak),
+            "missed_streak": missed_streak,
             "completed": bool(completed),
             "adh_7_pct": float(adh_7),
             "adh_28_pct": float(adh_28),
@@ -1990,24 +2066,29 @@ def page_adherence():
 def page_treatment():
     render_topbar()
     section("Treatment")
+    afid = active_facility_id()
+    if is_organizer() and not afid:
+        st.info("Organizer: select a facility in the sidebar ('Data Entry Facility') to create/view treatment for that facility.")
     pid = patient_picker()
     if not pid:
         st.stop()
 
     start_date = st.date_input("Start date", value=dt.date.today())
-    phase = selectbox_safe("Phase", ["Intensive", "Continuation"])
+    phase = st.selectbox("Phase", ["Intensive", "Continuation"])
     regimen = st.text_input("Regimen")
-    outcome = selectbox_safe("Outcome", ["On treatment", "Cured", "Completed", "Failed", "LTFU", "Transferred", "Died"])
+    outcome = st.selectbox("Outcome", ["On treatment", "Cured", "Completed", "Failed", "LTFU", "Transferred", "Died"])
     notes = st.text_area("Notes")
 
     if st.button("Save treatment update", type="primary"):
+        fac_to_use = require_facility_context_for_write() if is_organizer() else str(st.session_state.get("facility_id"))
+
         payload = {
-            "facility_id": facility_id,
-            "patient_id": str(pid),
+            "facility_id": fac_to_use,
+            "patient_id": pid,
             "start_date": start_date.isoformat(),
-            "phase": str(phase),
+            "phase": phase,
             "regimen": regimen.strip(),
-            "outcome": str(outcome),
+            "outcome": outcome,
             "notes": notes.strip(),
             "updated_at": now_iso(),
         }
@@ -2024,9 +2105,14 @@ def page_contact_tracing():
     section("Contact Tracing (WHO)")
     st.caption("Register household/close contacts for an index TB patient and track screening status.")
 
+    afid = active_facility_id()
+    if is_organizer() and not afid:
+        st.info("Organizer: select a facility in the sidebar ('Data Entry Facility') to create/view contacts for that facility.")
     pid = patient_picker()
     if not pid:
         st.stop()
+
+    fac_to_use = afid if afid else (str(st.session_state.get("facility_id")) if st.session_state.get("facility_id") else None)
 
     dfc = safe_select_with_order(
         "tb_contacts",
@@ -2039,11 +2125,11 @@ def page_contact_tracing():
         with c1:
             name = st.text_input("Contact full name *")
             age = st.number_input("Age", 0, 120, 20, key="ct_age")
-            sex = selectbox_safe("Sex", ["Male", "Female", "Other"], key="ct_sex")
+            sex = st.selectbox("Sex", ["Male", "Female", "Other"], key="ct_sex")
             phone = st.text_input("Phone", key="ct_phone")
         with c2:
             relationship = st.text_input("Relationship to index", value="", key="ct_rel")
-            setting = selectbox_safe("Exposure setting", ["household", "workplace", "school", "other"], key="ct_set")
+            setting = st.selectbox("Exposure setting", ["household", "workplace", "school", "other"], key="ct_set")
             last_exp = st.date_input("Last exposure date", value=dt.date.today(), key="ct_last")
         with c3:
             cough = st.checkbox("Cough", key="ct_cough")
@@ -2058,15 +2144,17 @@ def page_contact_tracing():
                 st.error("Contact full name is required.")
                 st.stop()
 
+            fac_write = require_facility_context_for_write() if is_organizer() else str(st.session_state.get("facility_id"))
+
             payload = {
-                "facility_id": facility_id,
-                "index_patient_id": str(pid),  # may be OFFLINE-*
+                "facility_id": fac_write,
+                "index_patient_id": pid,  # may be OFFLINE-*
                 "full_name": name.strip(),
                 "age": int(age),
-                "sex": str(sex),
+                "sex": sex,
                 "phone": phone.strip(),
                 "relationship_to_index": relationship.strip(),
-                "exposure_setting": str(setting),
+                "exposure_setting": setting,
                 "last_exposure_date": last_exp.isoformat(),
                 "cough": bool(cough),
                 "fever": bool(fever),
@@ -2093,6 +2181,9 @@ def page_drug_resistance():
     render_topbar()
     section("Drug Resistance (RR/MDR/XDR)")
 
+    afid = active_facility_id()
+    if is_organizer() and not afid:
+        st.info("Organizer: select a facility in the sidebar ('Data Entry Facility') to create/view drug resistance for that facility.")
     pid = patient_picker()
     if not pid:
         st.stop()
@@ -2112,9 +2203,11 @@ def page_drug_resistance():
     st.info(f"**Resistance class:** {resistance_class}")
 
     if st.button("Save resistance record", type="primary"):
+        fac_to_use = require_facility_context_for_write() if is_organizer() else str(st.session_state.get("facility_id"))
+
         payload = {
-            "facility_id": facility_id,
-            "patient_id": str(pid),
+            "facility_id": fac_to_use,
+            "patient_id": pid,
             "rifampicin_resistant": bool(rif),
             "isoniazid_resistant": bool(inh),
             "fluoroquinolone_resistant": bool(fq),
@@ -2187,6 +2280,9 @@ def page_genexpert_import():
     section("GeneXpert Import (CSV)")
     st.caption("Upload a CSV with columns: full_name, age, sex, mtb_result, rif_result, notes")
 
+    if is_organizer() and not active_facility_id():
+        st.info("Organizer: select a facility in the sidebar ('Data Entry Facility') before importing (so facility_id is set).")
+
     up = st.file_uploader("Upload GeneXpert CSV", type=["csv"])
     if not up:
         st.info("Upload a CSV to import.")
@@ -2208,6 +2304,8 @@ def page_genexpert_import():
         return
 
     if st.button("IMPORT NOW", type="primary"):
+        fac_to_use = require_facility_context_for_write() if is_organizer() else str(st.session_state.get("facility_id"))
+
         ok, fail = 0, 0
         for _, row in df.iterrows():
             try:
@@ -2215,21 +2313,21 @@ def page_genexpert_import():
                 if not full_name:
                     raise ValueError("Blank name")
 
-                age = int(_to_py_scalar(row.get(col_age, 0) or 0)) if col_age else 0
+                age = int(row.get(col_age, 0) or 0) if col_age else 0
                 sex = str(row.get(col_sex, "Other") or "Other").strip() if col_sex else "Other"
                 notes = str(row.get(col_notes, "") or "").strip() if col_notes else ""
 
                 mtb_detected = parse_bool_detected(row.get(col_mtb))
                 rif_detected = parse_bool_detected(row.get(col_rif))
 
-                q = df_select("patients", {"select": "patient_id,full_name", "full_name": f"eq.{full_name}", "limit": "1"})
+                q = df_select("patients", {"select": "patient_id,full_name,facility_id", "full_name": f"eq.{full_name}", "facility_id": f"eq.{fac_to_use}", "limit": "1"})
                 if not q.empty:
                     pid = str(q.iloc[0]["patient_id"])
                 else:
                     outp = insert_row(
                         "patients",
                         {
-                            "facility_id": facility_id,
+                            "facility_id": fac_to_use,
                             "full_name": full_name,
                             "age": int(age),
                             "sex": sex,
@@ -2245,7 +2343,7 @@ def page_genexpert_import():
                 insert_row(
                     "events",
                     {
-                        "facility_id": facility_id,
+                        "facility_id": fac_to_use,
                         "patient_id": pid,
                         "tb_probability": 0.95 if mtb_detected else 0.10,
                         "category": category,
@@ -2264,7 +2362,7 @@ def page_genexpert_import():
                     insert_row(
                         "tb_drug_resistance",
                         {
-                            "facility_id": facility_id,
+                            "facility_id": fac_to_use,
                             "patient_id": pid,
                             "rifampicin_resistant": True,
                             "isoniazid_resistant": False,
@@ -2289,7 +2387,7 @@ def page_genexpert_import():
 def page_who_dashboard():
     render_topbar()
     section("WHO Dashboard")
-    st.caption("Uses v_who_indicators_monthly view. Organizer sees national; others see facility only.")
+    st.caption("Uses v_who_indicators_monthly view. Organizer sees national/state; others see facility only.")
 
     dfw = df_select("v_who_indicators_monthly", {"select": "*", "limit": str(effective_limit())})
     if dfw.empty:
@@ -2301,7 +2399,7 @@ def page_who_dashboard():
         st.stop()
 
     if not is_organizer():
-        dfw = dfw[dfw["facility_id"].astype(str) == str(facility_id)]
+        dfw = dfw[dfw["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
     else:
         scope_state = st.session_state.get("org_scope_state")
         if scope_state and ("state" in dfw.columns):
@@ -2347,7 +2445,7 @@ def page_gis_heatmap():
         return
 
     if (not is_organizer()) and ("facility_id" in dfm.columns):
-        dfm = dfm[dfm["facility_id"].astype(str) == str(facility_id)]
+        dfm = dfm[dfm["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
 
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")
@@ -2395,7 +2493,7 @@ def page_outbreak_alerts():
         return
 
     if not is_organizer() and "facility_id" in dfh.columns:
-        dfh = dfh[dfh["facility_id"].astype(str) == str(facility_id)]
+        dfh = dfh[dfh["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
 
     show_cols = [c for c in ["facility_name", "state", "lga", "confirmed_7d", "confirmed_prev_28d", "ratio", "hotspot_level"] if c in dfh.columns]
     st.subheader("Hotspot ranking (last 7 days)")
@@ -2406,7 +2504,7 @@ def page_outbreak_alerts():
     try:
         dfa = df_select("tb_outbreak_alerts", {"select": "*", "order": "created_at.desc", "limit": "50"})
         if not is_organizer() and "facility_id" in dfa.columns:
-            dfa = dfa[dfa["facility_id"].astype(str) == str(facility_id)]
+            dfa = dfa[dfa["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
         df_show(dfa, hide_index=True)
     except Exception:
         st.info("tb_outbreak_alerts not available yet (safe to ignore if you haven't created it).")
@@ -2541,8 +2639,8 @@ ROLE_PERMISSIONS = {
 
 allowed_pages = ROLE_PERMISSIONS.get(role, ROLE_PERMISSIONS["viewer"])
 menu = [f"{TB_ICON} {p}" for p in allowed_pages]
-page = radio_safe("Menu", menu)
-page_clean = str(page).replace(TB_ICON, "").strip()
+page = st.sidebar.radio("Menu", menu)
+page_clean = page.replace(TB_ICON, "").strip()
 
 # ============================================================
 # ROUTER
