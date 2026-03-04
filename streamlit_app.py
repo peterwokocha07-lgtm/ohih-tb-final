@@ -15,6 +15,13 @@ try:
 except Exception:
     px = None
 
+# Optional: auto-refresh helper (if installed)
+try:
+    from streamlit_autorefresh import st_autorefresh  # type: ignore
+except Exception:
+    st_autorefresh = None  # fallback to manual refresh
+
+
 # ============================================================
 # BRANDING (OHIH-TB) + NATIONAL DASHBOARD LOOK
 # ============================================================
@@ -208,6 +215,12 @@ def ss_init():
     # last sync errors for debugging
     st.session_state.setdefault("offline_last_errors", [])  # List[str]
 
+    # 🔔 Real-time alerts (client-side polling)
+    st.session_state.setdefault("alerts_enabled", True)
+    st.session_state.setdefault("alerts_interval_sec", 20)  # auto-refresh interval
+    st.session_state.setdefault("alerts_last_seen_ts", None)  # ISO string
+    st.session_state.setdefault("alerts_seen_ids", set())  # type: ignore
+
 
 ss_init()
 
@@ -322,7 +335,6 @@ def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             temp_id = f"OFFLINE-{uuid.uuid4()}"
             meta["temp_patient_id"] = temp_id
 
-            # local cache for immediate picker use
             st.session_state["local_patients"].append(
                 {
                     "patient_id": temp_id,
@@ -337,7 +349,6 @@ def insert_row(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 }
             )
 
-            # IMPORTANT: do NOT queue a fake UUID into patient_id
             p.pop("patient_id", None)
 
         queue_write(table, p, op="insert", meta=meta)
@@ -392,7 +403,6 @@ def auth_sign_in(email: str, password: str) -> Dict[str, Any]:
     h = {"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"}
     r = requests.post(url, headers=h, params=params, json=payload, timeout=30)
     if r.status_code != 200:
-        # friendlier message but keep raw in exception
         raise RuntimeError(f"Login failed: {r.status_code} {r.text}")
     return r.json()
 
@@ -426,7 +436,7 @@ def load_facility(facility_id: str) -> Dict[str, Any]:
 
 
 # =========================
-# UI: Organizer scope + Offline/Low-BW
+# UI: Organizer scope + Offline/Low-BW + Alerts
 # =========================
 def org_scope_ui():
     if st.session_state.get("role") != "organizer":
@@ -461,16 +471,12 @@ def sync_offline_queue():
     ok, fail = 0, 0
     remaining: List[Dict[str, Any]] = []
 
-    # Pass 1: patients inserts ONLY
     patients_first = [x for x in q if x.get("op") == "insert" and x.get("table") == "patients"]
     rest = [x for x in q if x not in patients_first]
 
     mp: Dict[str, str] = st.session_state.get("id_map", {}) or {}
 
     def _needs_mapping(payload: Dict[str, Any]) -> Optional[str]:
-        """
-        If payload references OFFLINE-* ids that are not mapped yet, return a reason string.
-        """
         for k in ("patient_id", "index_patient_id"):
             v = payload.get(k)
             if isinstance(v, str) and v.startswith("OFFLINE-") and v not in mp:
@@ -484,7 +490,6 @@ def sync_offline_queue():
         match_params = item.get("match_params", {}) or {}
         meta = item.get("meta", {}) or {}
 
-        # delay if references offline ids not mapped yet (except patients itself)
         if table != "patients":
             need = _needs_mapping(payload)
             if need:
@@ -494,17 +499,15 @@ def sync_offline_queue():
 
         if op == "insert":
             if table == "patients":
-                # do NOT send offline temp id into patient_id (uuid column)
                 payload2 = dict(payload2)
-                payload2.pop("patient_id", None)  # force DB to generate uuid
+                payload2.pop("patient_id", None)
 
             r = rest_post(table, tok, payload2)
             if r.status_code not in (200, 201):
                 return False, f"{table} insert failed: {r.status_code} {r.text}"
 
             if table == "patients":
-                # Map temp_id -> real uuid
-                temp_id = meta.get("temp_patient_id")  # OFFLINE-...
+                temp_id = meta.get("temp_patient_id")
                 try:
                     rows = r.json() or []
                     if isinstance(rows, list) and rows:
@@ -518,8 +521,7 @@ def sync_offline_queue():
 
             return True, ""
 
-        elif op == "patch":
-            # Resolve ids in match_params too
+        if op == "patch":
             match2 = dict(match_params)
             mp2 = st.session_state.get("id_map", {}) or {}
             for k, v in list(match2.items()):
@@ -538,7 +540,6 @@ def sync_offline_queue():
 
         return False, f"Unknown op: {op}"
 
-    # --- send patients first
     for item in patients_first:
         try:
             ok_flag, err = send_item(item)
@@ -553,7 +554,6 @@ def sync_offline_queue():
             remaining.append(item)
             st.session_state["offline_last_errors"].append(f"patients insert exception: {e}")
 
-    # Pass 2: everything else (with temp ids now resolved)
     for item in rest:
         try:
             ok_flag, err = send_item(item)
@@ -568,7 +568,6 @@ def sync_offline_queue():
             remaining.append(item)
             st.session_state["offline_last_errors"].append(f"{item.get('table')} exception: {e}")
 
-    # Remove local patients that have been mapped (cleanup)
     if st.session_state.get("id_map"):
         mapped = set(st.session_state["id_map"].keys())
         st.session_state["local_patients"] = [p for p in st.session_state["local_patients"] if p.get("patient_id") not in mapped]
@@ -603,6 +602,245 @@ def offline_lowbw_ui():
                 sync_offline_queue()
 
 
+def alerts_ui():
+    st.sidebar.markdown("### 🔔 Real-time Alerts")
+    st.session_state["alerts_enabled"] = st.sidebar.toggle(
+        "Enable outbreak notifications", value=bool(st.session_state.get("alerts_enabled", True))
+    )
+    st.session_state["alerts_interval_sec"] = int(
+        st.sidebar.slider("Auto-refresh interval (seconds)", 10, 120, int(st.session_state.get("alerts_interval_sec", 20)), 5)
+    )
+
+    if st_autorefresh is None:
+        st.sidebar.caption("Auto-refresh helper not installed → use manual refresh or any click to update alerts.")
+    else:
+        st.sidebar.caption("Auto-refresh enabled when notifications are ON.")
+
+
+# =========================
+# 🔔 REAL-TIME ALERTS (toast + panel)
+# =========================
+def _safe_toast(msg: str, icon: str = "🔔"):
+    try:
+        st.toast(msg, icon=icon)  # available in modern Streamlit
+    except Exception:
+        # fallback: do nothing
+        pass
+
+
+def _parse_dt_any(x) -> Optional[dt.datetime]:
+    try:
+        if x is None:
+            return None
+        return pd.to_datetime(x, utc=True, errors="coerce").to_pydatetime()
+    except Exception:
+        return None
+
+
+def fetch_alerts_df() -> pd.DataFrame:
+    """
+    Primary source: tb_outbreak_alerts (if you have it)
+    Fallback: v_hotspots (if alerts table doesn't exist)
+    Returns a normalized dataframe with:
+      alert_time, facility_id, facility_name, state, lga, level, confirmed_7d, ratio, message, source_id
+    """
+    # Try table first
+    try:
+        dfa = df_select("tb_outbreak_alerts", {"select": "*", "limit": str(effective_limit()), "order": "created_at.desc"})
+        if not dfa.empty:
+            # Normalize best-effort
+            # Determine time column
+            time_col = "created_at" if "created_at" in dfa.columns else ("alert_time" if "alert_time" in dfa.columns else None)
+            if time_col is None:
+                dfa["created_at"] = now_iso()
+                time_col = "created_at"
+
+            # Normalize fields
+            out = pd.DataFrame()
+            out["alert_time"] = pd.to_datetime(dfa[time_col], errors="coerce", utc=True)
+            out["facility_id"] = dfa["facility_id"] if "facility_id" in dfa.columns else None
+            out["facility_name"] = dfa["facility_name"] if "facility_name" in dfa.columns else None
+            out["state"] = dfa["state"] if "state" in dfa.columns else None
+            out["lga"] = dfa["lga"] if "lga" in dfa.columns else None
+
+            # level
+            if "alert_level" in dfa.columns:
+                out["level"] = dfa["alert_level"].astype(str)
+            elif "level" in dfa.columns:
+                out["level"] = dfa["level"].astype(str)
+            elif "hotspot_level" in dfa.columns:
+                out["level"] = dfa["hotspot_level"].astype(str)
+            else:
+                out["level"] = "ALERT"
+
+            out["confirmed_7d"] = pd.to_numeric(dfa["confirmed_7d"], errors="coerce").fillna(0).astype(int) if "confirmed_7d" in dfa.columns else 0
+            out["ratio"] = pd.to_numeric(dfa["ratio"], errors="coerce") if "ratio" in dfa.columns else None
+
+            if "message" in dfa.columns:
+                out["message"] = dfa["message"].astype(str)
+            elif "notes" in dfa.columns:
+                out["message"] = dfa["notes"].astype(str)
+            else:
+                out["message"] = ""
+
+            # source id
+            if "alert_id" in dfa.columns:
+                out["source_id"] = dfa["alert_id"].astype(str)
+            elif "id" in dfa.columns:
+                out["source_id"] = dfa["id"].astype(str)
+            else:
+                out["source_id"] = out["alert_time"].astype(str) + "|" + out["facility_id"].astype(str)
+
+            out = out.dropna(subset=["alert_time"]).sort_values("alert_time", ascending=False)
+            return out
+    except Exception:
+        pass
+
+    # Fallback: v_hotspots
+    try:
+        dfh = df_select("v_hotspots", {"select": "*", "limit": str(effective_limit())})
+        if dfh.empty:
+            return pd.DataFrame()
+
+        out = pd.DataFrame()
+        # create pseudo time: now
+        out["alert_time"] = pd.to_datetime(now_iso(), utc=True)
+        out["facility_id"] = dfh["facility_id"] if "facility_id" in dfh.columns else None
+        out["facility_name"] = dfh["facility_name"] if "facility_name" in dfh.columns else None
+        out["state"] = dfh["state"] if "state" in dfh.columns else None
+        out["lga"] = dfh["lga"] if "lga" in dfh.columns else None
+        out["level"] = dfh["hotspot_level"].astype(str) if "hotspot_level" in dfh.columns else "HOTSPOT"
+        out["confirmed_7d"] = pd.to_numeric(dfh["confirmed_7d"], errors="coerce").fillna(0).astype(int) if "confirmed_7d" in dfh.columns else 0
+        out["ratio"] = pd.to_numeric(dfh["ratio"], errors="coerce") if "ratio" in dfh.columns else None
+        out["message"] = "Hotspot signal from v_hotspots (fallback)."
+        out["source_id"] = (out["facility_id"].astype(str) + "|" + out["level"].astype(str))
+
+        # only keep meaningful ones
+        if "confirmed_7d" in out.columns:
+            out = out[out["confirmed_7d"] >= 1]
+
+        return out.sort_values(["confirmed_7d"], ascending=False).head(50)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _apply_scope_filters(df: pd.DataFrame, facility_id: Optional[str]) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    role = st.session_state.get("role")
+
+    # facility users
+    if role != "organizer":
+        if "facility_id" in df.columns and facility_id is not None:
+            df = df[df["facility_id"].astype(str) == str(facility_id)]
+
+    # organizer scope state
+    if role == "organizer":
+        scope_state = st.session_state.get("org_scope_state")
+        if scope_state and "state" in df.columns:
+            df = df[df["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
+
+    return df
+
+
+def render_live_alerts_banner(facility_id: Optional[str]):
+    """
+    Shows toast notifications for NEW alerts and a small panel.
+    Uses optional auto-refresh if streamlit_autorefresh is available.
+    """
+    if not bool(st.session_state.get("alerts_enabled", True)):
+        return
+
+    # Auto-refresh (polling) if available
+    if st_autorefresh is not None:
+        interval_ms = int(st.session_state.get("alerts_interval_sec", 20)) * 1000
+        st_autorefresh(interval=interval_ms, key="ohih_alerts_autorefresh")
+
+    try:
+        df = fetch_alerts_df()
+    except Exception:
+        return
+
+    if df.empty:
+        return
+
+    df = _apply_scope_filters(df, facility_id)
+
+    if df.empty:
+        return
+
+    # Determine "new" alerts based on last seen timestamp and seen IDs
+    last_seen_ts = st.session_state.get("alerts_last_seen_ts")
+    last_seen_dt = _parse_dt_any(last_seen_ts)
+
+    seen_ids = st.session_state.get("alerts_seen_ids")
+    if not isinstance(seen_ids, set):
+        seen_ids = set()
+        st.session_state["alerts_seen_ids"] = seen_ids
+
+    # choose newest time
+    latest_time = df["alert_time"].max()
+    # toast only the top few new alerts
+    new_df = df.copy()
+
+    if last_seen_dt is not None:
+        new_df = new_df[new_df["alert_time"] > pd.to_datetime(last_seen_dt, utc=True)]
+
+    # Filter out already seen IDs
+    if "source_id" in new_df.columns:
+        new_df = new_df[~new_df["source_id"].astype(str).isin({str(x) for x in seen_ids})]
+
+    # Trigger toasts for new alerts (limit 3)
+    if not new_df.empty:
+        for _, r in new_df.head(3).iterrows():
+            level = str(r.get("level", "ALERT")).upper()
+            fac = str(r.get("facility_name", "Facility"))
+            state = str(r.get("state", "") or "")
+            lga = str(r.get("lga", "") or "")
+            c7 = int(r.get("confirmed_7d", 0) or 0)
+            ratio = r.get("ratio", None)
+
+            where = " / ".join([x for x in [state, lga] if x and x != "nan"])
+            ratio_txt = ""
+            try:
+                if ratio is not None and str(ratio) != "nan":
+                    ratio_txt = f" | Ratio: {float(ratio):.2f}x"
+            except Exception:
+                ratio_txt = ""
+
+            msg = f"{level}: {fac}" + (f" ({where})" if where else "") + f" | Confirmed(7d): {c7}{ratio_txt}"
+            if level in ("CRITICAL", "RED", "SEVERE"):
+                _safe_toast(msg, icon="🚨")
+            elif level in ("HIGH", "ORANGE"):
+                _safe_toast(msg, icon="⚠️")
+            else:
+                _safe_toast(msg, icon="🔔")
+
+            # mark seen
+            sid = str(r.get("source_id", ""))
+            if sid:
+                seen_ids.add(sid)
+
+        st.session_state["alerts_seen_ids"] = seen_ids
+
+    # update last seen to newest timestamp so we don't re-toast
+    if latest_time is not None and pd.notna(latest_time):
+        st.session_state["alerts_last_seen_ts"] = pd.to_datetime(latest_time, utc=True).isoformat()
+
+    # Small panel (top 5)
+    with st.expander("🔔 Live Outbreak Alerts (latest)", expanded=False):
+        show = df.head(10).copy()
+        # pretty columns
+        cols = [c for c in ["alert_time", "level", "facility_name", "state", "lga", "confirmed_7d", "ratio", "message"] if c in show.columns]
+        try:
+            show["alert_time"] = pd.to_datetime(show["alert_time"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+        df_show(show[cols], hide_index=True)
+        st.caption("Tip: If you don't see updates, click any button or enable auto-refresh (requires streamlit-autorefresh).")
+
+
 # =========================
 # KPI HELPERS (best-effort)
 # =========================
@@ -614,12 +852,10 @@ def _who_latest_metrics() -> Dict[str, Any]:
 
         role = st.session_state.get("role")
 
-        # Facility users → filter by facility
         if ("facility_id" in dfw.columns) and (role != "organizer"):
             facid = str(st.session_state.get("profile", {}).get("facility_id"))
             dfw = dfw[dfw["facility_id"].astype(str) == facid]
 
-        # Organizer → optional state scope
         if role == "organizer":
             scope_state = st.session_state.get("org_scope_state")
             if scope_state and ("state" in dfw.columns):
@@ -667,6 +903,7 @@ def render_topbar():
         <span class="ohih-badge">📡 Surveillance: ACTIVE</span>
         <span class="ohih-badge">📶 Low-BW: {"ON" if st.session_state.get("low_bw") else "OFF"}</span>
         <span class="ohih-badge">🛰️ Offline: {"ON" if st.session_state.get("offline_mode") else "OFF"}</span>
+        <span class="ohih-badge">🔔 Alerts: {"ON" if st.session_state.get("alerts_enabled") else "OFF"}</span>
       </div>
     </div>
     <div class="ohih-kpis">
@@ -694,6 +931,7 @@ with st.sidebar:
 
         org_scope_ui()
         offline_lowbw_ui()
+        alerts_ui()
 
         if st.button("Logout"):
             logout()
@@ -784,6 +1022,11 @@ else:
     st.session_state["facility_reg"] = fac.get("facility_reg", "") or ""
 
 
+# 🔔 Global live alerts (runs on every page)
+# Put it right after context so it can toast immediately after refresh/rerun
+render_live_alerts_banner(facility_id)
+
+
 # =========================
 # COMMON HELPERS
 # =========================
@@ -798,21 +1041,15 @@ def _local_patients_df() -> pd.DataFrame:
 
 
 def patient_picker() -> Optional[str]:
-    """
-    - Online mode: normal server list.
-    - Offline mode: server list + local offline patients list.
-    """
     dfp = safe_select_with_order(
         "patients",
         {"select": "patient_id,full_name,created_at,facility_id", "limit": str(effective_limit())},
         ["created_at.desc", "updated_at.desc", "patient_id.desc"],
     )
 
-    # Facility users: filter
     if not is_organizer() and (not dfp.empty) and ("facility_id" in dfp.columns) and facility_id is not None:
         dfp = dfp[dfp["facility_id"].astype(str) == str(facility_id)]
 
-    # Add offline-created patients so you can proceed immediately
     dfl = _local_patients_df()
     if not dfl.empty:
         dfl = dfl[["patient_id", "full_name", "created_at"]].copy()
@@ -822,7 +1059,6 @@ def patient_picker() -> Optional[str]:
         st.info("No patients yet. Add one first.")
         return None
 
-    # Sort by created_at desc
     try:
         dfp["created_at"] = pd.to_datetime(dfp["created_at"], errors="coerce")
         dfp = dfp.sort_values("created_at", ascending=False)
@@ -897,7 +1133,6 @@ def page_password_reset():
     with st.expander("DB Setup Help (if column is missing)", expanded=False):
         st.code(
             "alter table public.facilities add column if not exists facility_password_hash text;\n"
-            "-- optional: keep audit\n"
             "alter table public.facilities add column if not exists facility_password_updated_at timestamptz;\n",
             language="sql",
         )
@@ -933,7 +1168,6 @@ def page_password_reset():
             st.error("Invalid organizer reset key.")
             st.stop()
 
-        # confirm facility exists
         try:
             df_fac = df_select(
                 "facilities",
@@ -1487,7 +1721,7 @@ def page_diagnosis_events():
     if st.button("Save event", type="primary"):
         payload = {
             "facility_id": facility_id,
-            "patient_id": pid,  # may be OFFLINE-* and will be mapped during sync (or delayed until mapping)
+            "patient_id": pid,
             "tb_probability": float(tb_probability),
             "category": category,
             "genexpert": genexpert,
@@ -1707,7 +1941,7 @@ def page_contact_tracing():
 
             payload = {
                 "facility_id": facility_id,
-                "index_patient_id": pid,  # may be OFFLINE-* (delayed until mapped)
+                "index_patient_id": pid,
                 "full_name": name.strip(),
                 "age": int(age),
                 "sex": sex,
@@ -1843,8 +2077,6 @@ def page_genexpert_import():
                             "created_at": now_iso(),
                         },
                     )
-                    # if offline queued, we can't proceed to create events reliably (needs mapping),
-                    # so we just count as fail for that row in offline mode
                     if outp.get("queued"):
                         raise ValueError("Offline mode: import needs online sync (patients must get real uuid first).")
                     pid = str(outp.get("patient_id"))
@@ -2023,6 +2255,26 @@ def page_outbreak_alerts():
     section("Outbreak Alerts")
     st.caption("Uses v_hotspots view + tb_outbreak_alerts table (7d vs previous 28d).")
 
+    # Manual refresh button (useful if no auto-refresh helper installed)
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        if st.button("🔄 Refresh alerts now"):
+            st.rerun()
+    with c2:
+        st.caption("If your app is deployed without auto-refresh, click refresh to fetch latest alerts.")
+
+    # prefer showing normalized alerts
+    df_alerts = fetch_alerts_df()
+    df_alerts = _apply_scope_filters(df_alerts, facility_id)
+
+    if df_alerts.empty:
+        st.info("No alerts yet.")
+    else:
+        df_show(df_alerts.head(50), hide_index=True)
+
+    st.markdown("---")
+    st.subheader("Hotspot ranking (last 7 days)")
+
     try:
         dfh = df_select("v_hotspots", {"select": "*", "limit": str(effective_limit())})
     except Exception as e:
@@ -2038,7 +2290,6 @@ def page_outbreak_alerts():
         dfh = dfh[dfh["facility_id"].astype(str) == str(facility_id)]
 
     show_cols = [c for c in ["facility_name", "state", "lga", "confirmed_7d", "confirmed_prev_28d", "ratio", "hotspot_level"] if c in dfh.columns]
-    st.subheader("Hotspot ranking (last 7 days)")
     df_show(dfh[show_cols].sort_values("confirmed_7d", ascending=False), hide_index=True)
 
 
@@ -2092,7 +2343,7 @@ ROLE_PERMISSIONS = {
         "Outbreak Alerts",
         "Exports",
         "National View",
-        "Password Reset",  # NEW
+        "Password Reset",
     ],
     "facility_admin": [
         "Home",
