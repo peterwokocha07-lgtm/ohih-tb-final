@@ -132,16 +132,26 @@ def section(title: str):
 
 
 # ============================================================
-# Streamlit deprecation fix: use width instead of use_container_width
+# Streamlit deprecation fixes: dataframe + plotly use width
 # ============================================================
 def df_show(df, **kwargs):
     """
     Streamlit Cloud warning fix:
-    - use_container_width is deprecated for st.dataframe, use width="stretch".
+    - st.dataframe(use_container_width=...) deprecated → use width="stretch"
     """
     kwargs.pop("use_container_width", None)
     kwargs.setdefault("width", "stretch")
     return st.dataframe(df, **kwargs)
+
+
+def plotly_show(fig, **kwargs):
+    """
+    Streamlit Cloud warning fix:
+    - st.plotly_chart(use_container_width=...) deprecated → use width="stretch"
+    """
+    kwargs.pop("use_container_width", None)
+    kwargs.setdefault("width", "stretch")
+    return st.plotly_chart(fig, **kwargs)
 
 
 # =========================
@@ -299,7 +309,6 @@ def rpc_call(fn_name: str, access_token: str, payload: Dict[str, Any]) -> reques
     """
     Supabase RPC call:
       POST /rest/v1/rpc/<fn_name>
-    Your SQL function must exist, and should validate role + organizer_key if needed.
     """
     url = f"{REST_BASE}/rpc/{fn_name}"
     h = rest_headers(access_token)
@@ -429,13 +438,11 @@ def auth_sign_in(email: str, password: str) -> Dict[str, Any]:
     r = requests.post(url, headers=h, params=params, json=payload, timeout=30)
 
     if r.status_code != 200:
-        # show clean message instead of crashing
         st.error("Login failed.")
         try:
             data = r.json()
             st.code(data)
-            # extra friendly tips
-            if str(data.get("error_code","")) == "invalid_credentials":
+            if str(data.get("error_code", "")) == "invalid_credentials":
                 st.info(
                     "Fix: This email/password is not valid in Supabase Auth.\n"
                     "Go to Supabase → Authentication → Users and confirm the user exists, then reset password if needed."
@@ -539,11 +546,12 @@ def organizer_data_entry_facility_ui():
     idx = 0
     if current_id:
         try:
-            idx = 1 + df_fac.index[df_fac["facility_id"].astype(str) == str(current_id)][0]
+            idx_val = df_fac.index[df_fac["facility_id"].astype(str) == str(current_id)][0]
+            idx = int(idx_val) + 1  # CAST to int to avoid int64 selectbox index type issues
         except Exception:
             idx = 0
 
-    chosen = st.sidebar.selectbox("Data Entry Facility", labels, index=idx)
+    chosen = st.sidebar.selectbox("Data Entry Facility", labels, index=int(idx))
     if chosen.startswith("—"):
         st.session_state["active_facility_id"] = None
         st.session_state["active_facility_name"] = ""
@@ -571,7 +579,7 @@ def org_scope_ui():
     if current not in options:
         current = "National"
 
-    choice = st.sidebar.selectbox("🌍 Organizer Scope", options, index=options.index(current))
+    choice = st.sidebar.selectbox("🌍 Organizer Scope", options, index=int(options.index(current)))
     st.session_state["org_scope"] = choice
     st.session_state["org_scope_state"] = None if choice == "National" else choice
 
@@ -606,7 +614,6 @@ def sync_offline_queue():
         payload = item.get("payload", {}) or {}
         match_params = item.get("match_params", {}) or {}
 
-        # Resolve already-known mappings
         payload2 = _resolve_ids_in_payload(payload)
 
         # If this payload still has OFFLINE patient_id but no mapping -> DELAY
@@ -740,11 +747,6 @@ def offline_lowbw_ui():
 # AI WEIGHTS: LOAD/SAVE (optional DB integration)
 # =========================
 def try_load_ai_weights_from_db() -> None:
-    """
-    Optional: If you create a table/view to store weights, this will auto-load.
-    Expected table example: ai_scoring_weights(scope text, key text, weight int, updated_at timestamptz)
-    - scope: 'global' (recommended) or state/facility scope if you extend later
-    """
     if st.session_state.get("ai_weights_loaded"):
         return
 
@@ -765,21 +767,15 @@ def try_load_ai_weights_from_db() -> None:
                     pass
             st.session_state["ai_weights"] = weights
     except Exception:
-        # If table doesn't exist yet, ignore silently
         pass
 
     st.session_state["ai_weights_loaded"] = True
 
 
 def try_save_ai_weights_to_db(weights: Dict[str, int]) -> Tuple[bool, str]:
-    """
-    Optional save. If your DB doesn't have ai_scoring_weights yet, this will fail gracefully.
-    This uses UPSERT-like behavior by inserting rows; you can enforce unique(scope,key) on DB side.
-    """
     try:
         tok = st.session_state["access_token"]
         rows = [{"scope": "global", "key": k, "weight": int(v), "updated_at": now_iso()} for k, v in weights.items()]
-        # If you created unique(scope,key), Supabase can upsert via Prefer: resolution=merge-duplicates
         url = f"{REST_BASE}/ai_scoring_weights"
         h = rest_headers(tok)
         h["Prefer"] = "return=representation,resolution=merge-duplicates"
@@ -795,10 +791,6 @@ def try_save_ai_weights_to_db(weights: Dict[str, int]) -> Tuple[bool, str]:
 # OUTBREAK ALERTS: NOTIFIER
 # =========================
 def fetch_new_outbreak_alerts() -> List[Dict[str, Any]]:
-    """
-    Reads tb_outbreak_alerts (or a view) and returns rows newer than last seen.
-    You can change select columns to match your table schema.
-    """
     try:
         df = df_select(
             "tb_outbreak_alerts",
@@ -810,11 +802,9 @@ def fetch_new_outbreak_alerts() -> List[Dict[str, Any]]:
     if df.empty:
         return []
 
-    # Facility filter for non-organizer
     if (not is_organizer()) and ("facility_id" in df.columns) and st.session_state.get("facility_id"):
         df = df[df["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
 
-    # Organizer optional state scope
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")
         if scope_state and ("state" in df.columns):
@@ -836,7 +826,6 @@ def fetch_new_outbreak_alerts() -> List[Dict[str, Any]]:
         except Exception:
             df_new = df
     else:
-        # First run: don't spam—mark latest as seen
         latest = df["created_at"].max()
         st.session_state["last_alert_seen_ts"] = latest.isoformat()
         return []
@@ -856,14 +845,12 @@ def render_alerts_toast():
     if not new_rows:
         return
 
-    # Mark latest seen
     try:
         latest = max([pd.to_datetime(r.get("created_at"), utc=True) for r in new_rows])
         st.session_state["last_alert_seen_ts"] = latest.isoformat()
     except Exception:
         pass
 
-    # Toast each alert (cap)
     for r in new_rows[-5:]:
         title = str(r.get("title") or r.get("alert_title") or "Outbreak alert")
         fac = str(r.get("facility_name") or r.get("facility_id") or "")
@@ -889,12 +876,10 @@ def _who_latest_metrics() -> Dict[str, Any]:
 
         role = st.session_state.get("role")
 
-        # Facility users → filter by facility
         if ("facility_id" in dfw.columns) and (role != "organizer"):
             facid = str(st.session_state.get("profile", {}).get("facility_id"))
             dfw = dfw[dfw["facility_id"].astype(str) == facid]
 
-        # Organizer → optional state scope
         if role == "organizer":
             scope_state = st.session_state.get("org_scope_state")
             if scope_state and ("state" in dfw.columns):
@@ -916,7 +901,6 @@ def _who_latest_metrics() -> Dict[str, Any]:
 
 
 def render_topbar():
-    # For organizer, show the selected data-entry facility (if any) in the badge
     if is_organizer():
         fac_name = st.session_state.get("active_facility_name") or "National View"
         fac_reg = st.session_state.get("active_facility_reg") or "ALL"
@@ -1022,7 +1006,6 @@ if not is_logged_in():
             st.session_state["facility_name"] = "National View"
             st.session_state["facility_reg"] = "ALL"
             st.session_state["facility_id"] = None
-            # organizer active facility context stays None until user selects in sidebar
             st.session_state["active_facility_id"] = None
             st.session_state["active_facility_name"] = ""
             st.session_state["active_facility_reg"] = ""
@@ -1074,10 +1057,7 @@ else:
     st.session_state["facility_name"] = fac.get("facility_name", "") or "—"
     st.session_state["facility_reg"] = fac.get("facility_reg", "") or ""
 
-# Try auto-load weights if DB table exists
 try_load_ai_weights_from_db()
-
-# Trigger toast notifications if enabled
 render_alerts_toast()
 
 
@@ -1106,21 +1086,17 @@ def patient_picker() -> Optional[str]:
     Returns selected patient_id (string) or None.
     """
 
-    # Load online patients
     dfp = safe_select_with_order(
         "patients",
         {"select": "patient_id,full_name,created_at,facility_id,phone", "limit": str(effective_limit())},
         ["created_at.desc", "updated_at.desc", "patient_id.desc"],
     )
 
-    # Facility filter for non-organizer users
     if not is_organizer() and (not dfp.empty) and ("facility_id" in dfp.columns) and facility_id is not None:
         dfp = dfp[dfp["facility_id"].astype(str) == str(facility_id)]
 
-    # Merge offline/local patients
     dfl = _local_patients_df()
     if not dfl.empty:
-        # Ensure same columns exist
         if "phone" not in dfl.columns:
             dfl["phone"] = ""
         dfl2 = dfl[["patient_id", "full_name", "created_at", "phone"]].copy()
@@ -1134,7 +1110,6 @@ def patient_picker() -> Optional[str]:
         st.info("No patients yet. Add one first.")
         return None
 
-    # Clean + sort
     dfp["patient_id"] = dfp["patient_id"].astype(str)
     dfp["full_name"] = dfp["full_name"].astype(str).fillna("").str.strip()
     dfp["phone"] = dfp.get("phone", "").astype(str).fillna("").str.strip()
@@ -1142,7 +1117,6 @@ def patient_picker() -> Optional[str]:
     dfp["created_at"] = pd.to_datetime(dfp["created_at"], errors="coerce")
     dfp = dfp.sort_values("created_at", ascending=False)
 
-    # --- SEARCH UI ---
     st.markdown("#### 🔎 Find a registered patient")
     q = st.text_input("Search by name or phone", placeholder="Type e.g. 'Okoro' or '0803...'").strip().lower()
 
@@ -1157,7 +1131,6 @@ def patient_picker() -> Optional[str]:
         st.warning("No matching patient found.")
         return None
 
-    # Build stable labels (string only to avoid int64 issues)
     def _label(row) -> str:
         pid = str(row.get("patient_id", ""))
         name = str(row.get("full_name", "")).strip()
@@ -1165,11 +1138,10 @@ def patient_picker() -> Optional[str]:
         return f"{name} | {phone} | {pid}" if phone else f"{name} | {pid}"
 
     labels = [_label(r) for _, r in dfp.iterrows()]
-
     chosen = st.selectbox("Select patient", labels, index=0)
-    # patient_id is always after last " | "
     pid = chosen.split(" | ")[-1].strip()
     return pid
+
 
 def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -1197,7 +1169,6 @@ def classify_resistance(rr: bool, inh: bool, fq: bool, bdq: bool, lzd: bool) -> 
 
 
 def random_password(n: int = 12) -> str:
-    # simple, strong-enough generator without extra deps
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*?"
     return "".join(alphabet[uuid.uuid4().int % len(alphabet)] for _ in range(n))
 
@@ -1219,7 +1190,6 @@ def ai_prediction_df() -> pd.DataFrame:
         if scope_state and ("state" in df.columns):
             df = df[df["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
         if afid and ("facility_id" in df.columns):
-            # optionally focus AI panel on selected data-entry facility
             df = df[df["facility_id"].astype(str) == str(afid)]
     return df
 
@@ -1343,9 +1313,9 @@ def render_ai_block(show_map: bool = True):
     if not show_map:
         return
 
-        st.markdown("### 🗺️ AI Map Overlay")
+    # ✅ FIXED: this must NOT be inside the "return" block
+    st.markdown("### 🗺️ AI Map Overlay")
 
-    # Low-bandwidth: show table only
     if st.session_state.get("low_bw"):
         st.info("Low-bandwidth mode: map disabled. Turn it off in sidebar to view map.")
         try:
@@ -1355,7 +1325,6 @@ def render_ai_block(show_map: bool = True):
             st.exception(e)
         return
 
-    # Plotly not installed: show table
     if px is None:
         st.info("Plotly not available, so map overlay will show as a table. Add plotly to requirements.txt to enable maps.")
         try:
@@ -1365,7 +1334,6 @@ def render_ai_block(show_map: bool = True):
             st.exception(e)
         return
 
-    # Load map overlay view
     try:
         dfm = ai_map_df()
     except Exception as e:
@@ -1382,7 +1350,6 @@ def render_ai_block(show_map: bool = True):
         df_show(dfm, hide_index=True)
         return
 
-    # Clean coords
     dfm["latitude"] = pd.to_numeric(dfm["latitude"], errors="coerce")
     dfm["longitude"] = pd.to_numeric(dfm["longitude"], errors="coerce")
     dfm = dfm.dropna(subset=["latitude", "longitude"])
@@ -1391,17 +1358,14 @@ def render_ai_block(show_map: bool = True):
         st.warning("No facilities with coordinates. Add facilities.latitude and facilities.longitude.")
         return
 
-    # Ensure predicted_score exists and is numeric
     dfm["predicted_score"] = pd.to_numeric(dfm.get("predicted_score"), errors="coerce").fillna(0)
 
-    # Hover fields (only those that exist)
     hover_cols = [
         c for c in ["state", "lga", "predicted_risk", "predicted_score", "signal_7d", "confirmed_7d"]
         if c in dfm.columns
     ]
     hover_data = {c: True for c in hover_cols} if hover_cols else None
 
-    # NEW Plotly API (MapLibre). DO NOT use scatter_mapbox here.
     fig = px.scatter_map(
         dfm,
         lat="latitude",
@@ -1413,7 +1377,7 @@ def render_ai_block(show_map: bool = True):
         height=520,
     )
     fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
-    st.plotly_chart(fig, use_container_width=True)
+    plotly_show(fig, use_container_width=True)
 
 
 # ============================================================
@@ -1607,7 +1571,7 @@ def page_ai_weights_tuning():
         st.session_state["ai_weights"] = dict(DEFAULT_AI_WEIGHTS)
         st.success("Reset to defaults ✅")
 
-    if c3.button("Save weights to DB (ai_scoring_weights)", help="Requires you to create ai_scoring_weights table + unique(scope,key)."):
+    if c3.button("Save weights to DB (ai_scoring_weights)", help="Requires ai_scoring_weights table + unique(scope,key)."):
         ok, msg = try_save_ai_weights_to_db(weights)
         if ok:
             st.session_state["ai_weights"] = weights
@@ -1628,19 +1592,6 @@ def page_ai_weights_tuning():
 # PAGE (4): FACILITY AUTO-REGISTRATION WORKFLOW (Organizer) via RPC
 # =========================
 def page_facility_auto_registration():
-    """
-    This page is designed to work with ONE SQL RPC function you will add.
-
-    Recommended RPC function name:
-      auto_register_facility
-
-    Recommended payload keys:
-      organizer_key, facility_name, state, lga, latitude, longitude,
-      admin_email, admin_full_name, admin_staff_id, admin_profession, admin_temp_password
-
-    Recommended return:
-      facility_id, facility_reg, admin_user_id, admin_email, admin_temp_password
-    """
     render_topbar()
     section("Facility Auto-Registration (Organizer)")
 
@@ -1704,7 +1655,6 @@ def page_facility_auto_registration():
 
     st.markdown("---")
     if st.button("AUTO-REGISTER FACILITY NOW", type="primary"):
-        # Basic validation
         if not org_key.strip():
             st.error("Organizer key is required.")
             st.stop()
@@ -1718,7 +1668,6 @@ def page_facility_auto_registration():
             st.error("Admin temp password is required.")
             st.stop()
 
-        # Parse coords (optional)
         lat_v = None
         lon_v = None
         if latitude.strip():
@@ -1906,7 +1855,6 @@ def page_diagnosis_events():
         comorbid_cancer = st.checkbox("Cancer")
         comorbid_immunosuppressed = st.checkbox("Immunosuppressed (steroids/transplant)")
 
-    # --- use tunable weights
     w = st.session_state.get("ai_weights", DEFAULT_AI_WEIGHTS)
 
     score = 0
@@ -1975,7 +1923,7 @@ def page_diagnosis_events():
 
         payload = {
             "facility_id": fac_to_use,
-            "patient_id": pid,  # may be OFFLINE-* and will be mapped during sync
+            "patient_id": pid,
             "tb_probability": float(tb_probability),
             "category": category,
             "genexpert": genexpert,
@@ -2173,8 +2121,6 @@ def page_contact_tracing():
     if not pid:
         st.stop()
 
-    fac_to_use = afid if afid else (str(st.session_state.get("facility_id")) if st.session_state.get("facility_id") else None)
-
     dfc = safe_select_with_order(
         "tb_contacts",
         {"select": "*", "index_patient_id": f"eq.{pid}", "limit": str(effective_limit())},
@@ -2209,7 +2155,7 @@ def page_contact_tracing():
 
             payload = {
                 "facility_id": fac_write,
-                "index_patient_id": pid,  # may be OFFLINE-*
+                "index_patient_id": pid,
                 "full_name": name.strip(),
                 "age": int(age),
                 "sex": sex,
@@ -2381,7 +2327,15 @@ def page_genexpert_import():
                 mtb_detected = parse_bool_detected(row.get(col_mtb))
                 rif_detected = parse_bool_detected(row.get(col_rif))
 
-                q = df_select("patients", {"select": "patient_id,full_name,facility_id", "full_name": f"eq.{full_name}", "facility_id": f"eq.{fac_to_use}", "limit": "1"})
+                q = df_select(
+                    "patients",
+                    {
+                        "select": "patient_id,full_name,facility_id",
+                        "full_name": f"eq.{full_name}",
+                        "facility_id": f"eq.{fac_to_use}",
+                        "limit": "1",
+                    },
+                )
                 if not q.empty:
                     pid = str(q.iloc[0]["patient_id"])
                 else:
@@ -2481,6 +2435,7 @@ def page_who_dashboard():
     trend = dfw.groupby("month")[trend_cols].sum().reset_index()
     st.line_chart(trend.set_index("month"))
 
+
 def page_gis_heatmap():
     render_topbar()
     section("GIS Heatmap (Nigeria)")
@@ -2510,17 +2465,14 @@ def page_gis_heatmap():
         st.info("No facilities/events yet.")
         return
 
-    # Facility filter for non-organizer
     if (not is_organizer()) and ("facility_id" in dfm.columns):
         dfm = dfm[dfm["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
 
-    # Organizer scope filter
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")
         if scope_state and ("state" in dfm.columns):
             dfm = dfm[dfm["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
 
-    # Clean coords + intensity
     dfm["latitude"] = pd.to_numeric(dfm.get("latitude"), errors="coerce")
     dfm["longitude"] = pd.to_numeric(dfm.get("longitude"), errors="coerce")
     dfm["confirmed_tb"] = pd.to_numeric(dfm.get("confirmed_tb"), errors="coerce").fillna(0).astype(int)
@@ -2533,7 +2485,6 @@ def page_gis_heatmap():
     hover_cols = [c for c in ["state", "lga", "confirmed_tb", "total_events", "last_event_ts"] if c in dff.columns]
     hover_data = {c: True for c in hover_cols} if hover_cols else None
 
-    # NEW Plotly API (MapLibre). Avoid density_mapbox.
     fig = px.density_map(
         dff,
         lat="latitude",
@@ -2547,7 +2498,8 @@ def page_gis_heatmap():
     )
 
     fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
-    st.plotly_chart(fig, use_container_width=True)
+    plotly_show(fig, use_container_width=True)
+
 
 def page_outbreak_alerts():
     render_topbar()
