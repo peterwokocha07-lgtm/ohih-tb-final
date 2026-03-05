@@ -425,9 +425,25 @@ def auth_sign_in(email: str, password: str) -> Dict[str, Any]:
     params = {"grant_type": "password"}
     payload = {"email": email, "password": password}
     h = {"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"}
+
     r = requests.post(url, headers=h, params=params, json=payload, timeout=30)
+
     if r.status_code != 200:
-        raise RuntimeError(f"Login failed: {r.status_code} {r.text}")
+        # show clean message instead of crashing
+        st.error("Login failed.")
+        try:
+            data = r.json()
+            st.code(data)
+            # extra friendly tips
+            if str(data.get("error_code","")) == "invalid_credentials":
+                st.info(
+                    "Fix: This email/password is not valid in Supabase Auth.\n"
+                    "Go to Supabase → Authentication → Users and confirm the user exists, then reset password if needed."
+                )
+        except Exception:
+            st.code(r.text)
+        return {"error": "login_failed", "status": r.status_code, "raw": r.text}
+
     return r.json()
 
 
