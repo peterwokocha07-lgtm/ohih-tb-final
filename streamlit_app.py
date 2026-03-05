@@ -2490,9 +2490,9 @@ def page_gis_heatmap():
         hover_name="facility_name" if "facility_name" in dff.columns else None,
         hover_data={c: True for c in ["state", "lga", "confirmed_tb", "total_events", "last_event_ts"] if c in dff.columns},
     )
-    fig.update_layout(mapbox_style="open-street-map", margin={"l": 0, "r": 0, "t": 0, "b": 0})
+    fig = px.density_map(...)
+    fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
     st.plotly_chart(fig, use_container_width=True)
-
 
 def page_outbreak_alerts():
     render_topbar()
