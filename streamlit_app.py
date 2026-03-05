@@ -1100,46 +1100,76 @@ def _local_patients_df() -> pd.DataFrame:
 
 def patient_picker() -> Optional[str]:
     """
-    Online: server list
-    Offline: server list + local offline patients list
+    Patient selector with SEARCH.
+    - Online: loads from patients table (filtered by facility unless organizer)
+    - Offline: merges local offline-created patients
+    Returns selected patient_id (string) or None.
     """
-    base = {"select": "patient_id,full_name,created_at,facility_id", "limit": str(effective_limit())}
-    afid = active_facility_id()
-    if afid:
-        base["facility_id"] = f"eq.{afid}"
 
+    # Load online patients
     dfp = safe_select_with_order(
         "patients",
-        base,
+        {"select": "patient_id,full_name,created_at,facility_id,phone", "limit": str(effective_limit())},
         ["created_at.desc", "updated_at.desc", "patient_id.desc"],
     )
 
-    # If non-organizer and facility_id available: ensure facility filter
-    if not is_organizer() and (not dfp.empty) and ("facility_id" in dfp.columns) and st.session_state.get("facility_id"):
-        dfp = dfp[dfp["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
+    # Facility filter for non-organizer users
+    if not is_organizer() and (not dfp.empty) and ("facility_id" in dfp.columns) and facility_id is not None:
+        dfp = dfp[dfp["facility_id"].astype(str) == str(facility_id)]
 
+    # Merge offline/local patients
     dfl = _local_patients_df()
     if not dfl.empty:
-        dfl = dfl[["patient_id", "full_name", "created_at"]].copy()
-        dfp = pd.concat([dfp[["patient_id", "full_name", "created_at"]], dfl], ignore_index=True) if not dfp.empty else dfl
+        # Ensure same columns exist
+        if "phone" not in dfl.columns:
+            dfl["phone"] = ""
+        dfl2 = dfl[["patient_id", "full_name", "created_at", "phone"]].copy()
+        if not dfp.empty:
+            dfp2 = dfp[["patient_id", "full_name", "created_at", "phone"]].copy()
+            dfp = pd.concat([dfp2, dfl2], ignore_index=True)
+        else:
+            dfp = dfl2
 
     if dfp.empty:
-        if is_organizer() and not afid:
-            st.info("Organizer: select a facility in the sidebar ('Data Entry Facility') to see patients for that facility.")
-        else:
-            st.info("No patients yet. Add one first.")
+        st.info("No patients yet. Add one first.")
         return None
 
-    try:
-        dfp["created_at"] = pd.to_datetime(dfp["created_at"], errors="coerce")
-        dfp = dfp.sort_values("created_at", ascending=False)
-    except Exception:
-        pass
+    # Clean + sort
+    dfp["patient_id"] = dfp["patient_id"].astype(str)
+    dfp["full_name"] = dfp["full_name"].astype(str).fillna("").str.strip()
+    dfp["phone"] = dfp.get("phone", "").astype(str).fillna("").str.strip()
 
-    labels = (dfp["patient_id"].astype(str) + " — " + dfp["full_name"].astype(str)).tolist()
-    chosen = st.selectbox("Select patient", labels)
-    return chosen.split(" — ")[0].strip()
+    dfp["created_at"] = pd.to_datetime(dfp["created_at"], errors="coerce")
+    dfp = dfp.sort_values("created_at", ascending=False)
 
+    # --- SEARCH UI ---
+    st.markdown("#### 🔎 Find a registered patient")
+    q = st.text_input("Search by name or phone", placeholder="Type e.g. 'Okoro' or '0803...'").strip().lower()
+
+    if q:
+        dfp = dfp[
+            dfp["full_name"].str.lower().str.contains(q, na=False)
+            | dfp["phone"].str.lower().str.contains(q, na=False)
+            | dfp["patient_id"].str.lower().str.contains(q, na=False)
+        ]
+
+    if dfp.empty:
+        st.warning("No matching patient found.")
+        return None
+
+    # Build stable labels (string only to avoid int64 issues)
+    def _label(row) -> str:
+        pid = str(row.get("patient_id", ""))
+        name = str(row.get("full_name", "")).strip()
+        phone = str(row.get("phone", "")).strip()
+        return f"{name} | {phone} | {pid}" if phone else f"{name} | {pid}"
+
+    labels = [_label(r) for _, r in dfp.iterrows()]
+
+    chosen = st.selectbox("Select patient", labels, index=0)
+    # patient_id is always after last " | "
+    pid = chosen.split(" | ")[-1].strip()
+    return pid
 
 def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
