@@ -1356,6 +1356,8 @@ def render_ai_block(show_map: bool = True):
     if dfm.empty:
         st.warning("No facilities with coordinates. Add facilities.latitude and facilities.longitude.")
         return
+    dfm["predicted_score"] = pd.to_numeric(dfm.get("predicted_score"), errors="coerce").fillna(0)
+
     # --- Plotly Map ---
 if px is None:
     st.info("Plotly not available, showing map overlay as a table instead.")
@@ -1380,7 +1382,6 @@ fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
 
 st.plotly_chart(fig, use_container_width=True)
 
-    dfm["predicted_score"] = pd.to_numeric(dfm.get("predicted_score"), errors="coerce").fillna(0)
 
     fig = px.scatter_mapbox(
         dfm,
