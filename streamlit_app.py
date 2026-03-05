@@ -2451,7 +2451,6 @@ def page_who_dashboard():
     trend = dfw.groupby("month")[trend_cols].sum().reset_index()
     st.line_chart(trend.set_index("month"))
 
-
 def page_gis_heatmap():
     render_topbar()
     section("GIS Heatmap (Nigeria)")
@@ -2470,19 +2469,28 @@ def page_gis_heatmap():
         st.error("Plotly not installed. Add 'plotly' to requirements.txt then redeploy.")
         return
 
-    dfm = df_select("v_outbreak_facility", {"select": "*", "limit": str(effective_limit())})
+    try:
+        dfm = df_select("v_outbreak_facility", {"select": "*", "limit": str(effective_limit())})
+    except Exception as e:
+        st.error("Could not load v_outbreak_facility.")
+        st.exception(e)
+        return
+
     if dfm.empty:
         st.info("No facilities/events yet.")
         return
 
+    # Facility filter for non-organizer
     if (not is_organizer()) and ("facility_id" in dfm.columns):
         dfm = dfm[dfm["facility_id"].astype(str) == str(st.session_state.get("facility_id"))]
 
+    # Organizer scope filter
     if is_organizer():
         scope_state = st.session_state.get("org_scope_state")
         if scope_state and ("state" in dfm.columns):
             dfm = dfm[dfm["state"].astype(str).str.strip().str.lower() == scope_state.lower()]
 
+    # Clean coords + intensity
     dfm["latitude"] = pd.to_numeric(dfm.get("latitude"), errors="coerce")
     dfm["longitude"] = pd.to_numeric(dfm.get("longitude"), errors="coerce")
     dfm["confirmed_tb"] = pd.to_numeric(dfm.get("confirmed_tb"), errors="coerce").fillna(0).astype(int)
@@ -2492,7 +2500,11 @@ def page_gis_heatmap():
         st.warning("No facilities with coordinates.")
         return
 
-    fig = px.density_mapbox(
+    hover_cols = [c for c in ["state", "lga", "confirmed_tb", "total_events", "last_event_ts"] if c in dff.columns]
+    hover_data = {c: True for c in hover_cols} if hover_cols else None
+
+    # NEW Plotly API (MapLibre). Avoid density_mapbox.
+    fig = px.density_map(
         dff,
         lat="latitude",
         lon="longitude",
@@ -2501,9 +2513,9 @@ def page_gis_heatmap():
         zoom=4.2,
         height=560,
         hover_name="facility_name" if "facility_name" in dff.columns else None,
-        hover_data={c: True for c in ["state", "lga", "confirmed_tb", "total_events", "last_event_ts"] if c in dff.columns},
+        hover_data=hover_data,
     )
-    fig = px.density_map(...)
+
     fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
     st.plotly_chart(fig, use_container_width=True)
 
