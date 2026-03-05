@@ -1005,7 +1005,7 @@ if not is_logged_in():
     if st.button("Login", type="primary"):
         out = auth_sign_in(email.strip(), password)
         if out.get("error"):
-        st.stop()
+            st.stop()
         st.session_state["access_token"] = out["access_token"]
         st.session_state["user_id"] = out["user"]["id"]
 
