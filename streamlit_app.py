@@ -1313,8 +1313,9 @@ def render_ai_block(show_map: bool = True):
     if not show_map:
         return
 
-    st.markdown("### 🗺️ AI Map Overlay")
+        st.markdown("### 🗺️ AI Map Overlay")
 
+    # Low-bandwidth: show table only
     if st.session_state.get("low_bw"):
         st.info("Low-bandwidth mode: map disabled. Turn it off in sidebar to view map.")
         try:
@@ -1324,6 +1325,7 @@ def render_ai_block(show_map: bool = True):
             st.exception(e)
         return
 
+    # Plotly not installed: show table
     if px is None:
         st.info("Plotly not available, so map overlay will show as a table. Add plotly to requirements.txt to enable maps.")
         try:
@@ -1333,6 +1335,7 @@ def render_ai_block(show_map: bool = True):
             st.exception(e)
         return
 
+    # Load map overlay view
     try:
         dfm = ai_map_df()
     except Exception as e:
@@ -1349,6 +1352,7 @@ def render_ai_block(show_map: bool = True):
         df_show(dfm, hide_index=True)
         return
 
+    # Clean coords
     dfm["latitude"] = pd.to_numeric(dfm["latitude"], errors="coerce")
     dfm["longitude"] = pd.to_numeric(dfm["longitude"], errors="coerce")
     dfm = dfm.dropna(subset=["latitude", "longitude"])
@@ -1356,44 +1360,29 @@ def render_ai_block(show_map: bool = True):
     if dfm.empty:
         st.warning("No facilities with coordinates. Add facilities.latitude and facilities.longitude.")
         return
+
+    # Ensure predicted_score exists and is numeric
     dfm["predicted_score"] = pd.to_numeric(dfm.get("predicted_score"), errors="coerce").fillna(0)
 
-    # --- Plotly Map ---
-if px is None:
-    st.info("Plotly not available, showing map overlay as a table instead.")
-    df_show(dfm, hide_index=True)
-    return
+    # Hover fields (only those that exist)
+    hover_cols = [
+        c for c in ["state", "lga", "predicted_risk", "predicted_score", "signal_7d", "confirmed_7d"]
+        if c in dfm.columns
+    ]
+    hover_data = {c: True for c in hover_cols} if hover_cols else None
 
-hover_cols = [c for c in ["state", "lga", "predicted_risk", "predicted_score", "signal_7d", "confirmed_7d"] if c in dfm.columns]
-hover_data = {c: True for c in hover_cols} if hover_cols else None
-
-fig = px.scatter_map(
-    dfm,
-    lat="latitude",
-    lon="longitude",
-    size="predicted_score",
-    hover_name="facility_name" if "facility_name" in dfm.columns else None,
-    hover_data=hover_data,
-    zoom=4.2,
-    height=520,
-)
-
-fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
-
-st.plotly_chart(fig, use_container_width=True)
-
-
-    fig = px.scatter_mapbox(
+    # NEW Plotly API (MapLibre). DO NOT use scatter_mapbox here.
+    fig = px.scatter_map(
         dfm,
         lat="latitude",
         lon="longitude",
         size="predicted_score",
         hover_name="facility_name" if "facility_name" in dfm.columns else None,
-        hover_data={c: True for c in ["state", "lga", "predicted_risk", "predicted_score", "signal_7d", "confirmed_7d"] if c in dfm.columns},
+        hover_data=hover_data,
         zoom=4.2,
         height=520,
     )
-    fig.update_layout(mapbox_style="open-street-map", margin={"l": 0, "r": 0, "t": 0, "b": 0})
+    fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
     st.plotly_chart(fig, use_container_width=True)
 
 
