@@ -1356,6 +1356,29 @@ def render_ai_block(show_map: bool = True):
     if dfm.empty:
         st.warning("No facilities with coordinates. Add facilities.latitude and facilities.longitude.")
         return
+    # --- Plotly Map ---
+if px is None:
+    st.info("Plotly not available, showing map overlay as a table instead.")
+    df_show(dfm, hide_index=True)
+    return
+
+hover_cols = [c for c in ["state", "lga", "predicted_risk", "predicted_score", "signal_7d", "confirmed_7d"] if c in dfm.columns]
+hover_data = {c: True for c in hover_cols} if hover_cols else None
+
+fig = px.scatter_map(
+    dfm,
+    lat="latitude",
+    lon="longitude",
+    size="predicted_score",
+    hover_name="facility_name" if "facility_name" in dfm.columns else None,
+    hover_data=hover_data,
+    zoom=4.2,
+    height=520,
+)
+
+fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
+
+st.plotly_chart(fig, use_container_width=True)
 
     dfm["predicted_score"] = pd.to_numeric(dfm.get("predicted_score"), errors="coerce").fillna(0)
 
